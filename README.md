@@ -2,14 +2,21 @@
 
 A small pipeline for learning ClickHouse real-time aggregation through marketing
 attribution. A Python generator streams simulated e-commerce events into ClickHouse,
-and materialized views keep aggregate tables up to date. See [PRD.md](PRD.md) for the
-full spec.
+and materialized views keep aggregate tables up to date. Disregard the  [old_PRD.md](old_PRD.md)
+the old spec it has since been updated and is no longer in line with the actual project.
 
 ## Run it
 
 ```sh
 cp .env.example .env   # first run only
-docker compose up --build
+docker compose up -d   # starts ClickHouse only
+```
+
+The generator is behind a Compose profile. Once `generator/generate.py` exists, start it
+with:
+
+```sh
+docker compose --profile generator up --build
 ```
 
 ClickHouse runs `clickhouse/init/01_schema.sql` the first time it starts with an empty

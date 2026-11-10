@@ -1,6 +1,6 @@
 services:
   clickhouse:
-    image: clickhouse/clickhouse-server:latest
+    image: clickhouse/clickhouse-server: 26.8
     ports:
       - "127.0.0.1:8123:8123"
       - "127.0.0.1:9000:9000"
@@ -22,6 +22,8 @@ services:
       start_period: 10s
 
   generator:
+    # Opt-in: run with `docker compose --profile generator up --build`
+    profiles: ["generator"]
     build: ./generator
     depends_on:
       clickhouse:
@@ -30,7 +32,7 @@ services:
       CH_HOST: clickhouse
       CH_USER: ${CH_USER}
       CH_PASSWORD: ${CH_PASS}
-      CH_DB: ${CH_DB} 
+      CH_DB: ${CH_DB}
       EVENTS_PER_SEC: 200
       BATCH_SIZE: 1000
 
