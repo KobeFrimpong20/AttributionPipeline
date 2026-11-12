@@ -48,7 +48,7 @@ The project is being rebuilt to match the current spec.
 | # | Milestone | Status |
 | --- | --- | --- |
 | 1 | Docker Compose up, `events` table created, generator inserting | Done |
-| 2 | Sessions refresh with deduplication and the 30-minute timeout | Not started |
+| 2 | Sessions refresh with deduplication and the 30-minute timeout | Done |
 | 3 | Profiles keyed by cookie, with first touch | Not started |
 | 4 | Conversions stamped with all three models | Not started |
 | 5 | Ground-truth table and verification query passing | Not started |
@@ -180,14 +180,43 @@ SELECT event_id, count() FROM attribution.events GROUP BY event_id HAVING count(
 SELECT * FROM attribution.events WHERE received_at - event_time > 60;
 ```
 
-Queries for sessions, profiles, conversions and the verification check will be added
-here as each milestone lands.
+### Sessions
+
+`attribution.mv_sessions` refreshes every 5 minutes (on the clock: :00, :05, ...). Check its
+runs with:
+
+```sql
+SELECT status, last_success_time, read_rows, written_rows, exception
+FROM system.view_refreshes WHERE view = 'mv_sessions';
+```
+
+`sessions` stores partial aggregate states, so a session can have several rows until
+background merges combine them. Always read it with `GROUP BY` and the `-Merge` functions:
+
+```sql
+SELECT cookie_id, session_start,
+       min(first_event) AS first_event, max(last_event) AS last_event,
+       length(groupUniqArrayMerge(event_ids)) AS events,
+       groupUniqArrayIfMerge(landings) AS landings,
+       groupUniqArrayIfMerge(orders) AS orders,
+       argMaxIfMerge(user_id) AS user_id
+FROM attribution.sessions
+WHERE cookie_id = 'cookie_...'
+GROUP BY cookie_id, session_start ORDER BY first_event;
+```
+
+Use `first_event` for timing. `session_start` is only the key: the start as first seen,
+which stays put when a late event from before it arrives.
+
+Queries for profiles, conversions and the verification check will be added here as each
+milestone lands.
 
 ## Known limitations
 
 - **Split sessions:** sessions can be extended but not merged, so a late event that falls
   in the gap between two stored sessions leaves the visit split in two. Attribution is
-  unaffected, but session counts may be slightly high.
+  unaffected, but session counts may be slightly high. The generator never produces this,
+  because its visits are at least 31 minutes apart.
 - **One cookie is one customer:** profiles are keyed by cookie, with no identity
   resolution. Journeys across devices are not joined, which biases attribution towards
   late-funnel channels. Shared devices are not simulated.

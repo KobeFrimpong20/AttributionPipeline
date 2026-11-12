@@ -50,16 +50,16 @@ Events follow a strict event spec: each event type (product\_viewed, added\_to\_
 | Table | Engine | Key | Holds |
 | --- | --- | --- | --- |
 | events | MergeTree | PARTITION BY day of event\_time; ORDER BY (cookie\_id, received\_at) | Raw events, duplicates included |
-| sessions | AggregatingMergeTree | session ID (cookie + start) | Event IDs, first/last event time, landings as (time, channel), user\_id via argMax |
+| sessions | AggregatingMergeTree | cookie\_id, session\_start (start as first seen; never changes) | Event IDs, first/last event time, landings as (time, channel), orders as (order\_id, revenue, time), user\_id via argMaxIf, max received\_at (the watermark). Every column ignores repeated input |
 | profiles | AggregatingMergeTree | cookie\_id | Session IDs, first touch via argMinState(channel, landing time), landings, user\_id and properties via argMax |
 | conversions | ReplacingMergeTree(stamped\_at) | order\_id | Order time, revenue, conversion\_type, first touch, last touch, U-shaped as Array of (channel, credit) |
 | test.expected\_attribution | MergeTree | order\_id | Generator ground truth per order |
 
 ## Refresh logic (every 5 minutes)
 
-1. Read only the last two `event_time` partitions, then filter to rows with `received_at` after the previous run minus an overlap window of a few minutes.
-2. Deduplicate within the batch with `LIMIT 1 BY event_id`, and drop event IDs already stored on the matching session.
-3. Sessionise per cookie: a session ends after 30 minutes of inactivity, and each event extends it by 30 minutes. Campaign changes stay in the same session.
+1. Read only the last two `event_time` partitions, then filter to rows with `received_at` after the watermark (the highest `received_at` already in `sessions`) minus a 1-minute overlap. The overlap covers inserts that became visible after the previous run; late events need no overlap, since they get a fresh `received_at`.
+2. Deduplicate by construction: every `sessions` column uses an aggregate that ignores repeated input (min, max, sets), so duplicate sends, overlap re-reads and repeated runs all fold away. `LIMIT 1 BY event_id` trims each batch.
+3. Sessionise per cookie: a session ends after 30 minutes of inactivity, and each event extends it by 30 minutes. New events are placed on one timeline with the cookie's stored sessions that could still be open, and join the stored session in their group, keeping its key. A late event before a session's start moves `first_event` earlier; the key never changes. Campaign changes stay in the same session.
 4. Record a touch only on landings. Every landing in a session counts.
 5. Merge sessions into profiles by cookie. A cookie is one customer, so anonymous sessions before checkout already belong to the right profile; `user_id` is attached once known.
 6. Stamp new orders, and re-stamp orders in the last two partitions so late landings are reflected.
