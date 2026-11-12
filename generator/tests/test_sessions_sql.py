@@ -1,60 +1,17 @@
 """Integration tests for the sessions refresh (clickhouse/init/02_sessions.sql).
 
-They run the real refreshable view in a scratch database on the ClickHouse from
-docker-compose, and are skipped when it isn't reachable. Credentials come from the
-CH_USER / CH_PASSWORD environment variables, or the repo's .env.
+They run the real refreshable view in a scratch database (see clickhouse_sql.py) and
+are skipped when ClickHouse isn't reachable.
 """
 
-import os
-import re
 import unittest
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[2]
-INIT = REPO / "clickhouse" / "init"
+from clickhouse_sql import EVENT_COLUMNS as COLUMNS, connect, create_schema, refresh
+
 DB = "sessions_test"
-COLUMNS = ["event_id", "event_type", "event_time", "received_at", "cookie_id", "user_id",
-           "source", "is_landing", "channel", "order_id", "revenue", "properties"]
-
-
-def credentials():
-    env = {}
-    path = REPO / ".env"
-    if path.exists():
-        for line in path.read_text().splitlines():
-            if "=" in line and not line.lstrip().startswith("#"):
-                key, value = line.split("=", 1)
-                env[key.strip()] = value.strip()
-    return (os.environ.get("CH_USER", env.get("CH_USER", "default")),
-            os.environ.get("CH_PASSWORD", env.get("CH_PASS", "")))
-
-
-def connect():
-    try:
-        import clickhouse_connect
-        user, password = credentials()
-        client = clickhouse_connect.get_client(
-            host=os.environ.get("CH_HOST", "localhost"), port=int(os.environ.get("CH_PORT", "8123")),
-            username=user, password=password, connect_timeout=2)
-        client.command("SELECT 1")
-        return client
-    except Exception as e:  # driver missing or server down
-        raise unittest.SkipTest(f"ClickHouse not reachable: {e}")
-
-
-def statements(path, wanted):
-    """Returns the statements in `path` that mention `wanted`, retargeted to the scratch DB."""
-    sql = re.sub(r"--[^\n]*", "", path.read_text())
-    out = []
-    for stmt in (s.strip() for s in sql.split(";")):
-        if stmt and wanted in stmt:
-            stmt = stmt.replace("attribution.", f"{DB}.")
-            # Tests trigger every run themselves.
-            out.append(stmt.replace("REFRESH EVERY 5 MINUTE", "REFRESH EVERY 1 YEAR"))
-    return out
 
 
 class SessionsRefreshTest(unittest.TestCase):
@@ -65,13 +22,7 @@ class SessionsRefreshTest(unittest.TestCase):
         cls.t0 = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=2)
 
     def setUp(self):
-        c = self.client
-        c.command(f"DROP DATABASE IF EXISTS {DB}")
-        c.command(f"CREATE DATABASE {DB}")
-        for stmt in statements(INIT / "01_schema.sql", "attribution.events"):
-            c.command(stmt)
-        for stmt in statements(INIT / "02_sessions.sql", "attribution."):
-            c.command(stmt)
+        create_schema(self.client, DB, ["02_sessions.sql"])
         self.received = datetime.now(timezone.utc)
 
     @classmethod
@@ -98,8 +49,7 @@ class SessionsRefreshTest(unittest.TestCase):
         self.client.insert(f"{DB}.events", rows, column_names=COLUMNS)
 
     def refresh(self):
-        self.client.command(f"SYSTEM REFRESH VIEW {DB}.mv_sessions")
-        self.client.command(f"SYSTEM WAIT VIEW {DB}.mv_sessions")
+        refresh(self.client, DB, "mv_sessions")
 
     def sessions(self, cookie):
         rows = self.client.query(f"""

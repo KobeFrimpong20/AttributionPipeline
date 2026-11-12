@@ -11,7 +11,7 @@ import random
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, FrozenSet, List, Optional, Tuple
 
 from catalog import Collection, Product, pick_collection, pick_other_product, pick_product_in
 from events import Event, new_id, new_uuid
@@ -37,14 +37,29 @@ PAYMENT_METHODS: Tuple[str, ...] = ("card", "paypal", "apple_pay")
 
 STEP_GAP_SECONDS = (5.0, 90.0)  # between events in one visit
 
+# Names are drawn from a small pool, so different people can share one. Profiles store
+# the name but never link on it.
+FIRST_NAMES: Tuple[str, ...] = (
+    "Ada", "Ben", "Chloe", "Daniel", "Ella", "Felix", "Grace", "Hugo", "Isla", "Jack",
+    "Kemi", "Liam", "Maya", "Noah", "Olivia", "Priya", "Quinn", "Ravi", "Sofia", "Tom",
+)
+LAST_NAMES: Tuple[str, ...] = (
+    "Adams", "Brown", "Chen", "Davis", "Evans", "Frimpong", "Garcia", "Hughes", "Ito", "Jones",
+    "Khan", "Lopez", "Mensah", "Nguyen", "Okafor", "Patel", "Rossi", "Smith", "Taylor", "Walker",
+)
+
 
 @dataclass(frozen=True)
 class Customer:
     """What persists about a customer between visits."""
 
-    cookie_id: str
+    cookie_id: str  # the cookie of the current visit
     user_id: str = ""  # set at their first checkout
     email: str = ""
+    name: str = ""
+    # Cookies the person has checked out on. Events carry user_id only on these: a
+    # new cookie or device is logged out until the person checks out on it.
+    logged_in: FrozenSet[str] = frozenset()
     has_ordered: bool = False
     visits: int = 0
 
@@ -62,12 +77,23 @@ def new_customer(rng: random.Random) -> Customer:
     return Customer(cookie_id=new_id(rng, "cookie"))
 
 
+def name_for(user_id: str) -> str:
+    """Returns the person's name, derived from their user ID (no RNG draw)."""
+    n = int(user_id.split("_", 1)[1], 16)
+    return f"{FIRST_NAMES[n % len(FIRST_NAMES)]} {LAST_NAMES[n // len(FIRST_NAMES) % len(LAST_NAMES)]}"
+
+
 def identify(rng: random.Random, customer: Customer) -> Customer:
-    """Gives the customer a user ID and email if they don't have one yet."""
-    if customer.user_id:
-        return customer
-    user_id = new_id(rng, "user")
-    return replace(customer, user_id=user_id, email=f"{user_id}@example.com")
+    """Logs the customer in on the current cookie, creating their identity the first time."""
+    if not customer.user_id:
+        user_id = new_id(rng, "user")
+        customer = replace(customer, user_id=user_id, email=f"{user_id}@example.com", name=name_for(user_id))
+    return replace(customer, logged_in=customer.logged_in | {customer.cookie_id})
+
+
+def visible_user_id(customer: Customer) -> str:
+    """Returns the user ID events carry: only on a cookie the person is logged in on."""
+    return customer.user_id if customer.cookie_id in customer.logged_in else ""
 
 
 def draw_channel(rng: random.Random) -> str:
@@ -161,6 +187,7 @@ def simulate_visit(
                 checkout_token=checkout_token,
                 cart_token=cart_token,
                 email=customer.email,
+                name=customer.name,
                 item_count=str(len(cart)),
                 cart_total=str(cart_total(cart)),
             )
@@ -170,7 +197,8 @@ def simulate_visit(
             order_id = new_id(rng, "order")
             revenue = cart_total(cart)
             ordered = True
-            props.update(checkout_token=checkout_token, email=customer.email, item_count=str(len(cart)))
+            props.update(checkout_token=checkout_token, email=customer.email, name=customer.name,
+                         item_count=str(len(cart)))
 
         is_landing = landed and not events
         client_event = Event(
@@ -178,7 +206,7 @@ def simulate_visit(
             event_type=EVENT_TYPES[state],
             event_time=now,
             cookie_id=customer.cookie_id,
-            user_id=customer.user_id,
+            user_id=visible_user_id(customer),
             source="client",
             is_landing=is_landing,
             channel=channel if is_landing else "",

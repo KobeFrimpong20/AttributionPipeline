@@ -28,7 +28,7 @@ class WorkerTest(unittest.TestCase):
             self.assertEqual(len(steps), len(r.visits))
             self.assertEqual([d for s in steps for d in s.deliveries], r.deliveries)
             for s in steps:
-                self.assertEqual(s.cookie_id, r.customer.cookie_id)
+                self.assertEqual(s.cookies, r.cookies)
                 self.assertEqual(s.late_sender, r.late_sender)
 
     def test_worker_wakes_at_the_start_of_each_visit(self):
@@ -46,7 +46,7 @@ class WorkerTest(unittest.TestCase):
             self.assertEqual(len(grouped), len(r.visits))
             for visit in grouped:
                 self.assertFalse(visit[0].duplicate)
-                self.assertTrue(all(d.event.cookie_id == r.customer.cookie_id for d in visit))
+                self.assertTrue(all(d.event.cookie_id == visit[0].event.cookie_id for d in visit))
 
 
 class SeedsTest(unittest.TestCase):

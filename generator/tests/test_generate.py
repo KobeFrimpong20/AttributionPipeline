@@ -87,7 +87,7 @@ class RunWorkersTest(unittest.TestCase):
         until = START + timedelta(minutes=30)
         run_workers(0, Config(arrivals_per_sec=0.5), clock, clock.sleep, sink, until=until, log=lambda _: None)
         self.assertTrue(sink.events)
-        self.assertEqual(len(sink.customers), 30 * 60 * 0.5 + 1)
+        self.assertEqual(len({col(c, "seed", CUSTOMER_COLUMNS) for c in sink.customers}), 30 * 60 * 0.5 + 1)
         for row in sink.events:
             self.assertLessEqual(col(row, "event_time"), clock.now)
         self.assertTrue(clock.sleeps)
@@ -176,7 +176,8 @@ class ExplainTest(unittest.TestCase):
     def test_lists_every_delivery(self):
         r = simulate_customer(3, START)
         text = explain(3, START)
-        self.assertIn(r.customer.cookie_id, text)
+        for cookie in r.cookies:
+            self.assertIn(cookie, text)
         for d in r.deliveries:
             self.assertIn(str(d.event.event_id), text)
 

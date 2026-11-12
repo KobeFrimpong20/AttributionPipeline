@@ -36,8 +36,11 @@ class Summary:
     no_landing_visits: int
     unattributed_orders: int  # first orders with no landing since the customer arrived
     no_new_touch_orders: int  # repeat orders with no landing since the previous order
-    anon_before_first_order: int  # first orders, earlier visits     on the same cookie
+    anon_before_first_order: int  # first orders with earlier visits
     first_touch_before_first_order: int  # ...whose first landing ever was in one of them
+    cookies: int
+    multi_cookie_customers: int
+    identified_cookies: int  # cookies that ever carried a user_id
 
 
 MEDIUM_DELAY = timedelta(minutes=15)
@@ -96,12 +99,19 @@ def anonymous_history(r: CustomerResult) -> Tuple[int, int]:
     return 1, int(any(v.landed for v in r.visits[:first_order]))
 
 
+def cookie_counts(r: CustomerResult) -> Tuple[int, int, int]:
+    """Returns (cookies, 1 if the customer used several, cookies that ever identified)."""
+    identified = {e.cookie_id for e in r.events if e.user_id}
+    return len(r.cookies), int(len(r.cookies) > 1), len(identified)
+
+
 def summarise(results: Iterable[CustomerResult]) -> Summary:
     customers = visits = events = buyers = repeat_buyers = capped = 0
     late = held = bursts = medium = early = 0
     client_dups = server_dups = dup_orders = 0
     no_landing = unattributed = no_new_touch = 0
     anon_before = touch_before = 0
+    cookies = multi = identified = 0
     ft_visits = ft_orders = rp_visits = rp_orders = 0
     for r in results:
         customers += 1
@@ -130,10 +140,12 @@ def summarise(results: Iterable[CustomerResult]) -> Summary:
         no_landing, unattributed, no_new_touch = no_landing + nl, unattributed + ua, no_new_touch + nt
         ab, tb = anonymous_history(r)
         anon_before, touch_before = anon_before + ab, touch_before + tb
+        ck, mc, ic = cookie_counts(r)
+        cookies, multi, identified = cookies + ck, multi + mc, identified + ic
     return Summary(customers, visits, events, ft_visits, ft_orders, rp_visits, rp_orders,
                    buyers, repeat_buyers, capped, late, held, bursts, medium, early,
                    client_dups, server_dups, dup_orders, no_landing, unattributed, no_new_touch,
-                   anon_before, touch_before)
+                   anon_before, touch_before, cookies, multi, identified)
 
 
 def ratio(a: int, b: int) -> float:
@@ -162,6 +174,9 @@ def format_summary(s: Summary) -> str:
         f"repeat orders, no new touch     {ratio(s.no_new_touch_orders, s.repeat_orders):.2%}",
         f"first orders, earlier visits    {ratio(s.anon_before_first_order, s.first_time_orders):.2%}",
         f"  first touch in an earlier one {ratio(s.first_touch_before_first_order, s.first_time_orders):.2%}",
+        f"cookies per customer            {ratio(s.cookies, s.customers):.3f}",
+        f"customers with several cookies  {ratio(s.multi_cookie_customers, s.customers):.2%}",
+        f"cookies that ever identify      {ratio(s.identified_cookies, s.cookies):.2%}",
     ])
 
 
