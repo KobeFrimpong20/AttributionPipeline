@@ -7,7 +7,14 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import List
 
-from delivery import Delivery, deliver_visit, delivery_rng, is_late_sender
+from delivery import (
+    Delivery,
+    add_duplicates,
+    deliver_visit,
+    delivery_rng,
+    duplicates_rng,
+    is_late_sender,
+)
 from events import Event
 from journeys import Customer, new_customer, simulate_visit
 
@@ -27,7 +34,8 @@ class CustomerResult:
     customer: Customer  # final state
     visit_orders: List[bool]  # one entry per visit: did it end in an order
     late_sender: bool
-    deliveries: List[Delivery]  # one per event, in the same order as `events`
+    # Every event at least once, in event order; a duplicate follows its original.
+    deliveries: List[Delivery]
 
 
 def return_probability(ordered: bool, visits_so_far: int) -> float:
@@ -43,6 +51,7 @@ def simulate_customer(seed: int, start: datetime) -> CustomerResult:
     rng = random.Random(seed)
     send_rng = delivery_rng(seed)
     late_sender = is_late_sender(send_rng)
+    dup_rng = duplicates_rng(seed)
     customer = new_customer(rng)
     events: List[Event] = []
     deliveries: List[Delivery] = []
@@ -53,7 +62,7 @@ def simulate_customer(seed: int, start: datetime) -> CustomerResult:
         result = simulate_visit(rng, customer, visit_start)
         customer = result.customer
         events.extend(result.events)
-        deliveries.extend(deliver_visit(send_rng, result.events, late_sender))
+        deliveries.extend(add_duplicates(dup_rng, deliver_visit(send_rng, result.events, late_sender)))
         visit_orders.append(result.ordered)
         if customer.visits >= MAX_VISITS:
             break
