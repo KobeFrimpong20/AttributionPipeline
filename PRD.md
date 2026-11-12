@@ -55,7 +55,7 @@ Events follow a strict event spec: each event type (product\_viewed, added\_to\_
 | sessions | AggregatingMergeTree | cookie\_id, session\_start (start as first seen; never changes) | Event IDs, first/last event time, landings as (time, channel), orders as (order\_id, revenue, time), user\_id via argMaxIf, max received\_at (the watermark). Every column ignores repeated input |
 | identity\_links | AggregatingMergeTree | cookie\_id | The person (`user_id`) a cookie belongs to, from the first session that carried one |
 | profiles | AggregatingMergeTree | profile\_key (`user_id`, or the cookie for a never-identified cookie), kind | Cookies, sessions, first touch via argMinIf((time, channel)), landings as (time, channel, cookie), orders, email and name via argMaxIf, max received\_at (the watermark). Read through the `profiles_current` view |
-| conversions | ReplacingMergeTree(stamped\_at) | order\_id | Order time, revenue, conversion\_type, first touch, last touch, U-shaped as Array of (channel, credit) |
+| conversions | ReplacingMergeTree(stamped\_at), PARTITION BY day of order\_time | order\_id | Profile, order time, revenue, conversion\_type (first\_order / repeat\_order), attribution\_status, first touch, last touch, U-shaped as Array of (channel, credit) summed per channel, touch count. Read through `conversions_current` (FINAL) |
 | test.expected\_attribution | MergeTree | order\_id | Generator ground truth per order |
 
 ## Refresh logic (every 5 minutes)
@@ -65,15 +65,16 @@ Events follow a strict event spec: each event type (product\_viewed, added\_to\_
 3. Sessionise per cookie: a session ends after 30 minutes of inactivity, and each event extends it by 30 minutes. New events are placed on one timeline with the cookie's stored sessions that could still be open, and join the stored session in their group, keeping its key. A late event before a session's start moves `first_event` earlier; the key never changes. Campaign changes stay in the same session.
 4. Record a touch only on landings. Every landing in a session counts.
 5. Link cookies to people: a cookie belongs to the `user_id` of the first session that carried one (`identity_links`). Then build profiles: new session rows go to the person if their cookie is linked, otherwise to a provisional profile keyed by the cookie. When a cookie is newly linked, all its stored sessions are re-emitted into the person's profile (safe, since every aggregate ignores repeats), and `profiles_current` hides the provisional profile. Email and name come from events. Because `user_id` and `email` identify exactly one person, following chains of links never merges two profiles.
-6. Stamp new orders, and re-stamp orders in the last two partitions so late landings are reflected.
+6. Stamp orders: every order from the last two days of people whose profile got new rows since the last stamping (a new order, a late landing, a newly linked cookie) is stamped again, and the latest stamp wins. Linking a cookie always comes with a new session row, so stitching always triggers a re-stamp.
 
 ## Attribution rules
 
 - **Journey window:** landings since the customer's previous order, up to the order time.
-- **First-touch:** the person's first landing ever (acquisition channel), across every cookie linked to them, including anonymous sessions before checkout, read from the profile state.
-- **Last-touch:** the latest landing in the current journey before the order.
-- **U-shaped:** 40% first, 40% last, 20% split across the middle. One touch gets 100%, two touches get 50% each. Uses the current journey only.
-- **No landings:** a first order is `unattributed`. A repeat order is `returning, no new touch`.
+- **A touch is a landing.** Landings after the order never count for it.
+- **First-touch:** the person's first landing ever up to the order (acquisition channel), across every cookie linked to them, including anonymous sessions before checkout.
+- **Last-touch:** the latest landing in the journey window. Empty when the window has none.
+- **U-shaped:** the touches are the lifetime first touch followed by the landings in the journey window (the first touch is not repeated when it is already in the window). 40% first, 40% last, 20% split evenly across the middle; one touch gets 100%, two get 50% each. Credits are summed per channel.
+- **No landings:** a first order with no landing at all is `unattributed`, with every model empty. A repeat order with no landing since the previous order is `returning_no_new_touch`: last-touch is empty and U-shaped gives 100% to the lifetime first touch.
 
 ## Mock data
 
@@ -97,7 +98,7 @@ Events follow a strict event spec: each event type (product\_viewed, added\_to\_
 - **Split sessions:** sessions can be extended but not merged. A late event landing in the gap between two stored sessions leaves the visit split in two. Attribution is unaffected, since touches are counted per landing. Session counts may be slightly inflated.
 - **Devices that never log in:** a cookie is joined to its person only once they check out on it. Sessions on a device or cleared cookie that never reaches checkout stay in a separate provisional profile, so the person's real first touch can be missed. Shared devices are not simulated; the first person to identify on a cookie owns it.
 - **First touch can change after an order:** stitching a cookie can bring in an earlier landing after the person's orders were stamped. Conversions re-stamp orders in the last two partitions.
-- **Re-stamping window:** late landings only update orders in the last two partitions. Older orders keep their original stamp.
+- **Re-stamping window:** only orders from the last two days are re-stamped. Older orders keep their last stamp.
 - **Batch, not real time:** numbers lag by up to about 5 minutes.
 
 ## Future optimisations

@@ -52,7 +52,7 @@ The project is being rebuilt to match the current spec.
 | 1 | Docker Compose up, `events` table created, generator inserting | Done |
 | 2 | Sessions refresh with deduplication and the 30-minute timeout | Done |
 | 3 | Profiles stitched by identity, with first touch | Done |
-| 4 | Conversions stamped with all three models | Not started |
+| 4 | Conversions stamped with all three models | Done |
 | 5 | Ground-truth table and verification query passing | Not started |
 | 6 | Load test at 10,000 events/sec, with results in this README | Not started |
 
@@ -235,8 +235,40 @@ FROM attribution.identity_links WHERE cookie_id = 'cookie_...' GROUP BY cookie_i
 `first_touch_time` is NULL for someone with no landing yet. Profiles link on `user_id` (and
 `email`, which always comes with it), never on `name`: names are not unique.
 
-Queries for conversions and the verification check will be added here as each milestone
-lands.
+### Conversions
+
+`mv_conversions` runs after `mv_profiles` and stamps every order with three models:
+
+- **First-touch:** the person's first landing ever, across all their cookies.
+- **Last-touch:** the latest landing since their previous order.
+- **U-shaped:** the lifetime first touch plus the landings since the previous order:
+  40% first, 40% last, 20% split across the middle, summed per channel.
+
+When something changes for a person (a late landing, a newly linked cookie, another
+order), their recent orders are stamped again. `conversions` keeps every stamp and the
+latest wins, so read it through `conversions_current`:
+
+```sql
+-- Revenue by channel under each model
+SELECT channel,
+       sumIf(revenue, first_touch = channel) AS first_touch_revenue,
+       sumIf(revenue, last_touch = channel) AS last_touch_revenue,
+       sum(revenue * arraySum(arrayMap(t -> if(t.channel = channel, t.credit, 0), u_shaped))) AS u_shaped_revenue
+FROM attribution.conversions_current
+ARRAY JOIN arrayDistinct(arrayConcat([first_touch, last_touch], u_shaped.channel)) AS channel
+WHERE channel != ''
+GROUP BY channel ORDER BY u_shaped_revenue DESC;
+
+-- How orders were attributed
+SELECT conversion_type, attribution_status, count() FROM attribution.conversions_current
+GROUP BY ALL ORDER BY ALL;
+
+-- Every stamp of one order, newest first (re-stamps after late data)
+SELECT stamped_at, attribution_status, first_touch, last_touch, u_shaped
+FROM attribution.conversions WHERE order_id = 'order_...' ORDER BY stamped_at DESC;
+```
+
+The verification check will be added here with milestone 5.
 
 ## Known limitations
 
