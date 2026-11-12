@@ -89,13 +89,17 @@ def cart_total(cart: List[Product]) -> Decimal:
     return sum((p.price for p in cart), Decimal("0.00"))
 
 
-def simulate_visit(rng: random.Random, customer: Customer, start: datetime) -> VisitResult:
+def simulate_visit(
+    rng: random.Random, customer: Customer, start: datetime, landed: bool = True
+) -> VisitResult:
     """Walks the state machine once and returns the visit's events.
 
-    Customers who have ordered before use the repeat-customer transitions.
+    Customers who have ordered before use the repeat-customer transitions. With
+    `landed=False` the visit has no landing: the customer came back through a bookmark
+    or an open tab, so no event carries a channel, UTM tags or a click ID.
     """
     table = REPEAT_CUSTOMER_TRANSITIONS if customer.has_ordered else TRANSITIONS
-    channel = draw_channel(rng)
+    channel = draw_channel(rng) if landed else ""
 
     events: List[Event] = []
     cart: List[Product] = []
@@ -168,7 +172,7 @@ def simulate_visit(rng: random.Random, customer: Customer, start: datetime) -> V
             ordered = True
             props.update(checkout_token=checkout_token, email=customer.email, item_count=str(len(cart)))
 
-        is_landing = not events
+        is_landing = landed and not events
         client_event = Event(
             event_id=new_uuid(rng),
             event_type=EVENT_TYPES[state],

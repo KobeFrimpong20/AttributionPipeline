@@ -31,6 +31,17 @@ class VisitShapeTest(unittest.TestCase):
                 self.assertFalse(e.is_landing)
                 self.assertEqual(e.channel, "")
 
+    def test_visit_without_landing(self):
+        landing_keys = {"utm_source", "utm_campaign", "gclid", "fbclid"}
+        for seed in range(2_000):
+            rng = random.Random(seed)
+            v = simulate_visit(rng, new_customer(rng), START, landed=False)
+            self.assertIn(v.events[0].event_type, LANDING_TYPES)
+            for e in v.events:
+                self.assertFalse(e.is_landing)
+                self.assertEqual(e.channel, "")
+                self.assertFalse(landing_keys & e.properties.keys())
+
     def test_cart_rules_hold(self):
         for v in many_visits():
             cart = 0

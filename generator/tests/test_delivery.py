@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 import delivery
-from customers import simulate_customer
+from customers import simulate_customer, split_by_visit
 from delivery import (
     DUPLICATE_GAP_SECONDS,
     MEDIUM_DELAY_SECONDS,
@@ -24,14 +24,9 @@ def originals(deliveries):
     return [d for d in deliveries if not d.duplicate]
 
 
-def split_visits(deliveries):
-    """Groups a customer's original deliveries by visit; each visit opens with its landing."""
-    visits = []
-    for d in originals(deliveries):
-        if d.event.is_landing:
-            visits.append([])
-        visits[-1].append(d)
-    return visits
+def split_visits(r):
+    """Groups a customer's original deliveries by visit."""
+    return split_by_visit(originals(r.deliveries), r.visits)
 
 
 def late_customers(n=3_000):
@@ -52,7 +47,7 @@ class DeliverVisitTest(unittest.TestCase):
 
     def test_held_events_are_one_burst_at_the_end_of_the_visit(self):
         for r in late_customers():
-            for visit in split_visits(r.deliveries):
+            for visit in split_visits(r):
                 client = [d for d in visit if d.event.source == "client"]
                 flags = [d.held for d in client]
                 first = flags.index(True)
@@ -76,7 +71,7 @@ class DeliverVisitTest(unittest.TestCase):
 
     def test_burst_arrives_before_the_next_visit(self):
         for r in late_customers():
-            visits = split_visits(r.deliveries)
+            visits = split_visits(r)
             for current, nxt in zip(visits, visits[1:]):
                 last_delivery = max(d.deliver_at for d in current)
                 self.assertLess(last_delivery, nxt[0].event.event_time)
