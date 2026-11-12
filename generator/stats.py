@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Iterable, Tuple
 
-from customers import MAX_VISITS, CustomerResult, simulate_customer
+from customers import MAX_VISITS, CustomerResult, simulate_customer, split_by_visit
 
 
 @dataclass(frozen=True)
@@ -33,6 +33,9 @@ class Summary:
     client_duplicates: int
     server_duplicates: int
     duplicated_orders: int  # orders whose server order_placed was sent twice
+    no_landing_visits: int
+    unattributed_orders: int  # first orders with no landing since the customer arrived
+    no_new_touch_orders: int  # repeat orders with no landing since the previous order
 
 
 MEDIUM_DELAY = timedelta(minutes=15)
@@ -48,13 +51,31 @@ def delivery_counts(r: CustomerResult) -> Tuple[int, int, int, int]:
     medium = sum(at - last >= MEDIUM_DELAY for at, last in bursts.items())
 
     early_orders = 0
-    landing_at = datetime.min.replace(tzinfo=timezone.utc)
-    for d in originals:  # events are in visit order, each visit opens with its landing
-        if d.event.is_landing:
-            landing_at = d.deliver_at
-        elif d.event.source == "server" and d.deliver_at < landing_at:
-            early_orders += 1
+    for visit in split_by_visit(originals, r.visits):
+        landing = next((d for d in visit if d.event.is_landing), None)
+        if landing is None:
+            continue
+        early_orders += sum(d.event.source == "server" and d.deliver_at < landing.deliver_at
+                            for d in visit)
     return len(held), len(bursts), medium, early_orders
+
+
+def no_landing_counts(r: CustomerResult) -> Tuple[int, int, int]:
+    """Returns (visits without a landing, unattributed first orders, repeat orders with
+    no new touch). An order has no touch when no visit in its journey window landed."""
+    unattributed = no_new_touch = 0
+    window_landed = has_ordered = False
+    for v in r.visits:
+        window_landed = window_landed or v.landed
+        if not v.ordered:
+            continue
+        if not window_landed:
+            if has_ordered:
+                no_new_touch += 1
+            else:
+                unattributed += 1
+        has_ordered, window_landed = True, False
+    return sum(not v.landed for v in r.visits), unattributed, no_new_touch
 
 
 def duplicate_counts(r: CustomerResult) -> Tuple[int, int, int]:
@@ -69,13 +90,15 @@ def summarise(results: Iterable[CustomerResult]) -> Summary:
     customers = visits = events = buyers = repeat_buyers = capped = 0
     late = held = bursts = medium = early = 0
     client_dups = server_dups = dup_orders = 0
+    no_landing = unattributed = no_new_touch = 0
     ft_visits = ft_orders = rp_visits = rp_orders = 0
     for r in results:
         customers += 1
-        visits += len(r.visit_orders)
+        visit_orders = [v.ordered for v in r.visits]
+        visits += len(visit_orders)
         events += len(r.events)
         has_ordered = False
-        for ordered in r.visit_orders:
+        for ordered in visit_orders:
             if has_ordered:
                 rp_visits += 1
                 rp_orders += ordered
@@ -83,18 +106,20 @@ def summarise(results: Iterable[CustomerResult]) -> Summary:
                 ft_visits += 1
                 ft_orders += ordered
             has_ordered = has_ordered or ordered
-        orders = sum(r.visit_orders)
+        orders = sum(visit_orders)
         buyers += orders > 0
         repeat_buyers += orders > 1
-        capped += len(r.visit_orders) >= MAX_VISITS
+        capped += len(visit_orders) >= MAX_VISITS
         late += r.late_sender
         h, b, m, o = delivery_counts(r)
         held, bursts, medium, early = held + h, bursts + b, medium + m, early + o
         c, sv, do = duplicate_counts(r)
         client_dups, server_dups, dup_orders = client_dups + c, server_dups + sv, dup_orders + do
+        nl, ua, nt = no_landing_counts(r)
+        no_landing, unattributed, no_new_touch = no_landing + nl, unattributed + ua, no_new_touch + nt
     return Summary(customers, visits, events, ft_visits, ft_orders, rp_visits, rp_orders,
                    buyers, repeat_buyers, capped, late, held, bursts, medium, early,
-                   client_dups, server_dups, dup_orders)
+                   client_dups, server_dups, dup_orders, no_landing, unattributed, no_new_touch)
 
 
 def ratio(a: int, b: int) -> float:
@@ -118,6 +143,9 @@ def format_summary(s: Summary) -> str:
         f"events sent twice               {ratio(s.client_duplicates + s.server_duplicates, s.events):.2%}",
         f"  of which server events        {ratio(s.server_duplicates, s.client_duplicates + s.server_duplicates):.2%}",
         f"orders with a duplicate server  {ratio(s.duplicated_orders, s.first_time_orders + s.repeat_orders):.2%}",
+        f"visits with no landing          {ratio(s.no_landing_visits, s.visits):.2%}",
+        f"first orders, unattributed      {ratio(s.unattributed_orders, s.first_time_orders):.2%}",
+        f"repeat orders, no new touch     {ratio(s.no_new_touch_orders, s.repeat_orders):.2%}",
     ])
 
 
