@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable, List, Optional, Protocol, Tuple
 
 from delivery import Delivery
-from scheduler import CustomerRecord, new_scheduler, step
+from scheduler import CustomerRecord, new_scheduler, skip_arrivals, step
 from workers import seeds_for
 
 EVENT_COLUMNS: Tuple[str, ...] = (
@@ -29,6 +29,8 @@ CUSTOMER_COLUMNS: Tuple[str, ...] = ("cookie_id", "seed", "start", "late_sender"
 TICK_SECONDS = 0.1  # how often the real-time loop wakes up
 BACKFILL_STEP = timedelta(seconds=1)  # how far simulated time moves per backfill step
 LOG_EVERY_SECONDS = 10.0
+# A clock jump longer than this in real time means the host slept or the process stalled.
+STALL_SECONDS = 30.0
 SEEDS_PER_RUN = 10**9  # each run's seeds start at run_id * SEEDS_PER_RUN
 
 Clock = Callable[[], datetime]
@@ -76,8 +78,11 @@ def run_workers(
 
     With backfill, simulated time starts `backfill_hours` in the past and moves in
     BACKFILL_STEP steps without sleeping until it catches up with the clock. From then
-    on it follows the clock.
+    on it follows the clock. If the clock later jumps ahead (the host slept, or the
+    process stalled), that is an outage, not a backfill: the arrivals missed during the
+    gap are skipped, and customers already active send their overdue events late.
     """
+    label = f"process {process}/{config.processes}"
     rate = config.arrivals_per_sec / config.processes
     start = clock() - timedelta(hours=config.backfill_hours)
     # Offset each process's first arrival so arrivals interleave across processes.
@@ -88,39 +93,70 @@ def run_workers(
     events: List[tuple] = []
     customers: List[tuple] = []
     sim_now = start
+    caught_up = config.backfill_hours <= 0
     last_flush = last_log = clock()
     inserted = 0
+    waiting_at_last_log = 0
+    oldest_buffered: Optional[datetime] = None  # earliest deliver_at not yet inserted
+    max_lag = 0.0  # seconds; largest insert time minus deliver_at since the last log
 
-    def flush() -> None:
-        nonlocal events, customers, inserted
+    def flush(now: datetime) -> None:
+        nonlocal events, customers, inserted, oldest_buffered, max_lag
         if customers:
             sink.insert_customers(customers)
         if events:
             sink.insert_events(events)
+        if caught_up and oldest_buffered is not None:
+            max_lag = max(max_lag, (now - oldest_buffered).total_seconds())
         inserted += len(events)
-        events, customers = [], []
+        events, customers, oldest_buffered = [], [], None
 
+    log(f"{label} started: {rate:g} arrivals/s, backfill {config.backfill_hours:g} h, "
+        f"run {config.run_id}")
     while until is None or sim_now < until:
         real = clock()
-        backfilling = sim_now + BACKFILL_STEP < real
-        sim_now = sim_now + BACKFILL_STEP if backfilling else real
+        if not caught_up:
+            if sim_now + BACKFILL_STEP < real:
+                sim_now += BACKFILL_STEP
+            else:
+                sim_now, caught_up = real, True
+                log(f"{label}: backfill done, running in real time")
+        else:
+            gap = (real - sim_now).total_seconds()
+            if gap > STALL_SECONDS:
+                skipped = skip_arrivals(sched, real, rate)
+                log(f"{label}: WARNING clock jumped {format_gap(gap)} (host asleep or process "
+                    f"stalled); skipped {skipped:,} arrivals, active customers send overdue events late")
+            sim_now = real
         result = step(sched, sim_now, rate)
+        if result.deliveries and oldest_buffered is None:
+            oldest_buffered = result.deliveries[0].deliver_at
         events.extend(to_row(d) for d in result.deliveries)
         customers.extend(customer_row(c) for c in result.customers)
 
         if len(events) >= config.batch_size or (real - last_flush).total_seconds() >= config.flush_seconds:
-            flush()
+            flush(clock())
             last_flush = real
         if (real - last_log).total_seconds() >= LOG_EVERY_SECONDS:
             elapsed = (real - last_log).total_seconds()
-            mode = "backfill" if backfilling else "real time"
-            log(f"process {process}: {inserted / elapsed:,.0f} events/s, "
-                f"{len(sched.waiting):,} customers waiting, {len(sched.due):,} deliveries queued, "
+            waiting = len(sched.waiting)
+            mode = "real time" if caught_up else "backfill"
+            lag = f"max lag {max_lag:.1f}s" if caught_up else "max lag -"
+            log(f"{label}: {inserted / elapsed:,.0f} events/s, "
+                f"{waiting:,} customers waiting ({waiting - waiting_at_last_log:+,}), "
+                f"{len(sched.due):,} deliveries queued, {lag}, "
                 f"{mode}, simulated time {sim_now:%H:%M:%S}")
-            inserted, last_log = 0, real
-        if not backfilling:
+            inserted, last_log, waiting_at_last_log, max_lag = 0, real, waiting, 0.0
+        if caught_up:
             sleep(TICK_SECONDS)
-    flush()
+    flush(clock())
+
+
+def format_gap(seconds: float) -> str:
+    """Formats a duration as e.g. '1h44m' or '2m05s'."""
+    minutes, secs = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}m" if hours else f"{minutes}m{secs:02d}s"
 
 
 class ClickHouseSink:

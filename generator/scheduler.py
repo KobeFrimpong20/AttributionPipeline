@@ -49,6 +49,20 @@ def new_scheduler(seeds: Iterator[int], start: datetime) -> Scheduler:
     return Scheduler(seeds=seeds, next_arrival=start)
 
 
+def skip_arrivals(s: Scheduler, now: datetime, arrivals_per_sec: float) -> int:
+    """Moves the next arrival past `now` without creating anyone; returns how many were skipped.
+
+    Used after an outage: customers who would have arrived during it never do. The
+    arrival spacing is kept.
+    """
+    if s.next_arrival > now:
+        return 0
+    interval = timedelta(seconds=1.0 / arrivals_per_sec)
+    skipped = (now - s.next_arrival) // interval + 1
+    s.next_arrival += skipped * interval
+    return skipped
+
+
 def step(s: Scheduler, now: datetime, arrivals_per_sec: float) -> StepResult:
     """Advances the scheduler to `now` and returns the deliveries that are due."""
     interval = timedelta(seconds=1.0 / arrivals_per_sec)
