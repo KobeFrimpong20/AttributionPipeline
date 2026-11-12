@@ -14,8 +14,9 @@ Each order gets three attribution models:
 
 The generator also records the correct answer for every order. A single verification
 query checks the pipeline's output against it, including under messy data: late events,
-duplicate sends, repeat customers, anonymous sessions before checkout and orders with no
-landings. The target is 10,000 events/sec sustained end to end.
+duplicate sends, repeat customers, anonymous sessions before checkout, orders with no
+landings, cleared cookies and second devices. The target is 10,000 events/sec sustained
+end to end.
 
 The full design is in the [design spec](PRD.md).
 
@@ -26,7 +27,7 @@ journey model ──> generator ──batch INSERT──> events (raw, append-on
                       │                          │
                       │                every 5 min (refreshable views)
                       │                          ▼
-                      │              sessions ─> profiles ─> conversions
+                      │     sessions ─> identity_links ─> profiles ─> conversions
                       │                                          │
                       └──> test.expected_attribution <── verification query
 ```
@@ -37,7 +38,8 @@ journey model ──> generator ──batch INSERT──> events (raw, append-on
    into `events` and writes the ground truth to `test.expected_attribution`.
 3. **`events`:** the raw event log. Duplicates are kept here and removed during refreshes.
 4. **Refreshable views:** every 5 minutes they build `sessions`, merge them into
-   `profiles` and stamp `conversions` with all three attribution models.
+   `profiles` (one per person, across every cookie they identified on) and stamp
+   `conversions` with all three attribution models.
 5. **Verification:** a full outer join of `conversions` against the ground truth that
    flags wrong, missing and invented orders.
 
@@ -49,7 +51,7 @@ The project is being rebuilt to match the current spec.
 | --- | --- | --- |
 | 1 | Docker Compose up, `events` table created, generator inserting | Done |
 | 2 | Sessions refresh with deduplication and the 30-minute timeout | Done |
-| 3 | Profiles keyed by cookie, with first touch | Not started |
+| 3 | Profiles stitched by identity, with first touch | Done |
 | 4 | Conversions stamped with all three models | Not started |
 | 5 | Ground-truth table and verification query passing | Not started |
 | 6 | Load test at 10,000 events/sec, with results in this README | Not started |
@@ -157,9 +159,9 @@ SELECT count() FROM attribution.events;
 ### Trace an event back to the generator
 
 `attribution.events` holds only what production would see. The generator also writes one
-row per customer to `test.customers` (`cookie_id`, `seed`, `start`, `late_sender`), and a
-customer's seed and start time rebuild every event it sent. To see what was injected for
-a cookie:
+row per cookie to `test.customers` (`cookie_id`, `seed`, `start`, `late_sender`); a
+customer with a second device or a cleared cookie has one row for each. A customer's seed
+and start time rebuild every event they sent. To see what was injected for a cookie:
 
 ```sql
 SELECT seed, start FROM test.customers WHERE cookie_id = 'cookie_...';
@@ -208,8 +210,33 @@ GROUP BY cookie_id, session_start ORDER BY first_event;
 Use `first_event` for timing. `session_start` is only the key: the start as first seen,
 which stays put when a late event from before it arrives.
 
-Queries for profiles, conversions and the verification check will be added here as each
-milestone lands.
+### Profiles
+
+A profile is one person: every cookie that ever carried their `user_id`, so a cleared
+cookie or a phone joins the profile once the person checks out on it. A cookie that never
+identifies keeps a provisional profile keyed by the cookie (`kind = 'cookie'`). Three
+views run in a chain every 5 minutes: `mv_sessions`, then `mv_identity`, then `mv_profiles`.
+
+Read profiles through `profiles_current`, which merges the partial states and hides
+provisional profiles whose cookie has since been linked to a person:
+
+```sql
+SELECT profile_key, kind, cookies, length(sessions) AS sessions,
+       first_touch_channel, first_touch_time, email, name
+FROM attribution.profiles_current
+WHERE kind = 'user' AND length(cookies) > 1   -- people seen on several cookies
+LIMIT 10;
+
+-- Which person a cookie belongs to
+SELECT cookie_id, argMinMerge(user_id) AS user_id, min(linked_at) AS linked_at
+FROM attribution.identity_links WHERE cookie_id = 'cookie_...' GROUP BY cookie_id;
+```
+
+`first_touch_time` is NULL for someone with no landing yet. Profiles link on `user_id` (and
+`email`, which always comes with it), never on `name`: names are not unique.
+
+Queries for conversions and the verification check will be added here as each milestone
+lands.
 
 ## Known limitations
 
@@ -217,9 +244,10 @@ milestone lands.
   in the gap between two stored sessions leaves the visit split in two. Attribution is
   unaffected, but session counts may be slightly high. The generator never produces this,
   because its visits are at least 31 minutes apart.
-- **One cookie is one customer:** profiles are keyed by cookie, with no identity
-  resolution. Journeys across devices are not joined, which biases attribution towards
-  late-funnel channels. Shared devices are not simulated.
+- **Devices that never log in:** a cookie joins its person only once they check out on
+  it. Sessions on a device or cleared cookie that never reaches checkout stay in a
+  separate provisional profile, so the person's real first touch can be missed. Shared
+  devices are not simulated.
 - **Re-stamping window:** late landings only update orders in the last two daily
   partitions.
 - **Batch, not real time:** numbers lag by up to about 5 minutes.

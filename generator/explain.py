@@ -18,13 +18,14 @@ from workers import deliveries_by_visit
 def explain(seed: int, start: datetime) -> str:
     r = simulate_customer(seed, start)
     lines: List[str] = [
-        f"cookie {r.customer.cookie_id}  user {r.customer.user_id or '-'}  "
+        f"user {r.customer.user_id or '-'}  name {r.customer.name or '-'}  "
         f"late sender {'yes' if r.late_sender else 'no'}  visits {len(r.visits)}",
+        f"cookies {' '.join(r.cookies)}",
     ]
     for i, (summary, deliveries) in enumerate(zip(r.visits, deliveries_by_visit(r))):
         landing = next((d.event for d in deliveries if d.event.is_landing), None)
         touch = landing.channel if landing else "NO LANDING"
-        lines.append(f"\nvisit {i + 1}: {touch}{'  ORDER' if summary.ordered else ''}")
+        lines.append(f"\nvisit {i + 1}: {summary.cookie_id}  {touch}{'  ORDER' if summary.ordered else ''}")
         for d in deliveries:
             e = d.event
             delay = (d.deliver_at - e.event_time).total_seconds()

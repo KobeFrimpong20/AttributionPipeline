@@ -50,17 +50,20 @@ class SchedulerTest(unittest.TestCase):
 
     def test_arrivals_follow_the_rate(self):
         _, customers = run()
-        self.assertEqual([c.seed for c in customers], list(range(CUSTOMERS)))
-        for i, c in enumerate(customers):
-            self.assertEqual(c.start, START + timedelta(seconds=i / RATE))
-            r = simulate_customer(c.seed, c.start)
-            self.assertEqual(c.cookie_id, r.customer.cookie_id)
-            self.assertEqual(c.late_sender, r.late_sender)
+        by_seed = {}
+        for c in customers:  # one record per cookie
+            by_seed.setdefault(c.seed, []).append(c)
+        self.assertEqual(list(by_seed), list(range(CUSTOMERS)))
+        for seed, records in by_seed.items():
+            start = START + timedelta(seconds=seed / RATE)
+            r = simulate_customer(seed, start)
+            self.assertEqual([c.cookie_id for c in records], r.cookies)
+            self.assertTrue(all(c.start == start and c.late_sender == r.late_sender for c in records))
 
     def test_open_ended_seeds_keep_arriving(self):
         s = new_scheduler(iter(range(10**9)), START)
         result = step(s, START + timedelta(seconds=99), arrivals_per_sec=2.0)
-        self.assertEqual(len(result.customers), 199)  # arrivals at 0, 0.5, ..., 99 s
+        self.assertEqual(len({c.seed for c in result.customers}), 199)  # arrivals at 0, 0.5, ..., 99 s
 
 
 class SkipArrivalsTest(unittest.TestCase):

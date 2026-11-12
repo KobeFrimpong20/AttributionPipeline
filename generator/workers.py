@@ -33,7 +33,7 @@ class Worker:
 class VisitStep:
     deliveries: List[Delivery]  # this visit's deliveries, duplicates included
     next_worker: Optional[Worker]  # None after the customer's last visit
-    cookie_id: str
+    cookies: List[str]  # every cookie the customer uses, in order of first use
     late_sender: bool
 
 
@@ -68,7 +68,7 @@ def next_visit(worker: Worker) -> VisitStep:
     return VisitStep(
         deliveries=visits[worker.visit],
         next_worker=next_worker,
-        cookie_id=r.customer.cookie_id,
+        cookies=r.cookies,
         late_sender=r.late_sender,
     )
 

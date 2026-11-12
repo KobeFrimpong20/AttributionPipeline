@@ -20,7 +20,11 @@ NEVER = datetime.max.replace(tzinfo=timezone.utc)
 
 @dataclass(frozen=True)
 class CustomerRecord:
-    """One row for test.customers: links a cookie back to the input that made it."""
+    """One row for test.customers: links a cookie back to the input that made it.
+
+    A customer with several cookies (a second device, a cleared cookie) has one row per
+    cookie, all written when the customer arrives.
+    """
 
     cookie_id: str
     seed: int
@@ -31,7 +35,7 @@ class CustomerRecord:
 @dataclass(frozen=True)
 class StepResult:
     deliveries: List[Delivery]  # due by `now`, in deliver_at order
-    customers: List[CustomerRecord]  # customers whose first visit started in this step
+    customers: List[CustomerRecord]  # one per cookie of customers who arrived in this step
 
 
 @dataclass
@@ -80,7 +84,8 @@ def step(s: Scheduler, now: datetime, arrivals_per_sec: float) -> StepResult:
         _, _, worker = heapq.heappop(s.waiting)
         visit = next_visit(worker)
         if worker.visit == 0:
-            customers.append(CustomerRecord(visit.cookie_id, worker.seed, worker.start, visit.late_sender))
+            customers.extend(CustomerRecord(cookie, worker.seed, worker.start, visit.late_sender)
+                             for cookie in visit.cookies)
         for d in visit.deliveries:
             heapq.heappush(s.due, (d.deliver_at, next(s.counter), d))
         if visit.next_worker is not None:
