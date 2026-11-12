@@ -33,8 +33,15 @@ services:
       CH_USER: ${CH_USER}
       CH_PASSWORD: ${CH_PASS}
       CH_DB: ${CH_DB}
-      EVENTS_PER_SEC: 200
-      BATCH_SIZE: 1000
+      # New customers per second across all processes. Each customer sends about 8.4
+      # events over about 2.5 hours, so the event rate reaches steady state after about
+      # 3 hours (or straight away with BACKFILL_HOURS). About 1,190 gives 10k events/sec.
+      ARRIVALS_PER_SEC: ${ARRIVALS_PER_SEC:-20}
+      PROCESSES: ${PROCESSES:-1}
+      BATCH_SIZE: ${BATCH_SIZE:-10000}
+      FLUSH_SECONDS: ${FLUSH_SECONDS:-1}
+      # Opt-in: build this many hours of history at startup, then run in real time.
+      BACKFILL_HOURS: ${BACKFILL_HOURS:-0}
 
 volumes:
   ch_data:
