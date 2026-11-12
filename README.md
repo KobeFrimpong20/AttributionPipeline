@@ -82,15 +82,49 @@ Set these in `.env` or on the command line, e.g. `ARRIVALS_PER_SEC=100 docker co
 | `BACKFILL_HOURS` | 0 | Hours of history to build at startup before running in real time |
 
 **Why the setting is arrivals, not events per second.** Every event is inserted in real
-time, when it happens. A customer sends about 8.4 events (duplicates included) over about
-2.5 hours, so the event rate is roughly `8.4 × ARRIVALS_PER_SEC` once the oldest customers
-are finishing, about 3 hours after startup. 10,000 events/sec needs about 1,190 arrivals
-per second. Measure throughput only after that warm-up.
+time, when it happens. A customer sends about 8.4 events (duplicates included), so the
+steady-state rate is about `8.4 × ARRIVALS_PER_SEC`, and 10,000 events/sec needs about
+1,190 arrivals per second. Getting there takes a long time. The average customer is
+active for about 2.5 hours, but repeat buyers keep coming back for much longer:
 
-**Backfill trade-off.** `BACKFILL_HOURS` skips the warm-up by building the last few hours
-of customers immediately. Their events keep their real `event_time`, but `received_at` is
-the insert time, so every backfilled event looks late. Use it for a quick demo, not for
-the verification run or the load test.
+| Time since startup | 1 h | 3 h | 8 h | 12 h | 24 h |
+| --- | --- | --- | --- | --- | --- |
+| Event rate, share of steady state | 45% | 66% | 88% | 94% | about 100% |
+
+**Backfill trade-off.** `BACKFILL_HOURS` skips the warm-up by building that much history
+immediately (12 to 24 hours gets close to steady state). Backfilled events keep their real
+`event_time`, but `received_at` is the insert time, so every one of them looks late. That
+is fine for a demo, and for a load test that measures only after the backfill finishes.
+For the verification run, warm up in real time instead.
+
+### Reading the logs
+
+`docker compose logs -f generator` shows one line per process every 10 seconds:
+
+```
+process 0/1: 155 events/s, 145,065 customers waiting (+12), 18,565 deliveries queued, max lag 0.9s, real time, simulated time 13:27:36
+```
+
+| Field | Meaning | Normal |
+| --- | --- | --- |
+| `events/s` | Rows inserted by this process over the last 10 s, duplicates included | Climbs along the warm-up table above |
+| `customers waiting (+N)` | Customers between visits who will come back, and the change since the last line | Grows fast at first, then slows; levels off at about `8,800 × ARRIVALS_PER_SEC` after about a day. A shrinking `+N` means warm-up is ending, not a leak |
+| `deliveries queued` | Events already simulated whose delivery time hasn't arrived (visits in progress, held late bursts) | Proportional to `events/s`, about 2 minutes' worth |
+| `max lag` | Largest delay between an event's delivery time and its insert, over the last 10 s | About `FLUSH_SECONDS`. If it keeps growing, this process can't keep up: add `PROCESSES` |
+| `real time` / `backfill` | Whether the process follows the clock or is still building backfill history | `backfill` only at startup, when `BACKFILL_HOURS > 0` |
+
+Each process also prints `process p/N started` when it begins, so with `PROCESSES=4` you
+should see four of them.
+
+### Long runs on a laptop
+
+Docker pauses while the Mac sleeps. When it wakes, the generator logs
+`WARNING clock jumped ...` and treats the gap as an outage: customers who would have
+arrived during it are skipped, and customers already active send their overdue events
+late, in one burst. To avoid this during long runs, keep the Mac awake in another
+terminal, for example with `caffeinate -i docker compose logs -f generator`. Restarting
+the generator (for example to change `PROCESSES`) starts a new run: customers in memory
+are dropped, and new ones start with a new `run_id`.
 
 **How it scales.** A worker is one customer, but it is stored as a few fields (seed,
 start time, next visit) in a heap rather than as a thread. When a visit is due, the

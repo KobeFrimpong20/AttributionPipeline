@@ -34,8 +34,8 @@ services:
       CH_PASSWORD: ${CH_PASS}
       CH_DB: ${CH_DB}
       # New customers per second across all processes. Each customer sends about 8.4
-      # events over about 2.5 hours, so the event rate reaches steady state after about
-      # 3 hours (or straight away with BACKFILL_HOURS). About 1,190 gives 10k events/sec.
+      # events, so about 1,190 gives 10k events/sec at steady state. Warm-up is slow:
+      # 66% of steady state after 3 h, 94% after 12 h (or skip it with BACKFILL_HOURS).
       ARRIVALS_PER_SEC: ${ARRIVALS_PER_SEC:-20}
       PROCESSES: ${PROCESSES:-1}
       BATCH_SIZE: ${BATCH_SIZE:-10000}

@@ -3,7 +3,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 from customers import simulate_customer
-from scheduler import new_scheduler, step
+from scheduler import new_scheduler, skip_arrivals, step
 
 START = datetime(2026, 1, 1, tzinfo=timezone.utc)
 RATE = 0.1  # one customer every 10 seconds
@@ -61,6 +61,25 @@ class SchedulerTest(unittest.TestCase):
         s = new_scheduler(iter(range(10**9)), START)
         result = step(s, START + timedelta(seconds=99), arrivals_per_sec=2.0)
         self.assertEqual(len(result.customers), 199)  # arrivals at 0, 0.5, ..., 99 s
+
+
+class SkipArrivalsTest(unittest.TestCase):
+    def test_skips_to_the_first_slot_after_now_without_creating_anyone(self):
+        s = new_scheduler(iter(range(10**9)), START)
+        step(s, START + timedelta(seconds=10), arrivals_per_sec=1.0)  # arrivals 0..10 s
+        waiting = len(s.waiting)
+        skipped = skip_arrivals(s, START + timedelta(hours=2), arrivals_per_sec=1.0)
+        self.assertEqual(skipped, 2 * 3600 - 10)
+        self.assertEqual(s.next_arrival, START + timedelta(hours=2, seconds=1))
+        self.assertEqual(len(s.waiting), waiting)
+        result = step(s, START + timedelta(hours=2, seconds=3), arrivals_per_sec=1.0)
+        self.assertEqual([c.start for c in result.customers],
+                         [START + timedelta(hours=2, seconds=k) for k in (1, 2, 3)])
+
+    def test_nothing_to_skip(self):
+        s = new_scheduler(iter(range(10)), START + timedelta(minutes=5))
+        self.assertEqual(skip_arrivals(s, START, arrivals_per_sec=1.0), 0)
+        self.assertEqual(s.next_arrival, START + timedelta(minutes=5))
 
 
 if __name__ == "__main__":
