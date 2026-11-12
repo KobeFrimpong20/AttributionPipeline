@@ -7,7 +7,7 @@ A single-node ClickHouse pipeline that ingests 10,000 events/sec and computes fi
 - Sustain 10,000 events/sec end to end: inserts keep up and every 5-minute refresh finishes before the next, with no growing backlog.
 -
 - Attribute every order with first-touch, last-touch and U-shaped models.
-- Prove correctness under messy data (late events, duplicates, shared devices, repeat customers) with a single verification query.
+- Prove correctness under messy data (late events, duplicates, repeat customers, anonymous sessions before checkout, orders with no landings) with a single verification query.
 
 ## Non-goals
 
@@ -51,7 +51,7 @@ Events follow a strict event spec: each event type (product\_viewed, added\_to\_
 | --- | --- | --- | --- |
 | events | MergeTree | PARTITION BY day of event\_time; ORDER BY (cookie\_id, received\_at) | Raw events, duplicates included |
 | sessions | AggregatingMergeTree | session ID (cookie + start) | Event IDs, first/last event time, landings as (time, channel), user\_id via argMax |
-| profiles | AggregatingMergeTree | user\_id | Session IDs, first touch via argMinState(channel, landing time), landings, properties via argMax |
+| profiles | AggregatingMergeTree | cookie\_id | Session IDs, first touch via argMinState(channel, landing time), landings, user\_id and properties via argMax |
 | conversions | ReplacingMergeTree(stamped\_at) | order\_id | Order time, revenue, conversion\_type, first touch, last touch, U-shaped as Array of (channel, credit) |
 | test.expected\_attribution | MergeTree | order\_id | Generator ground truth per order |
 
@@ -61,13 +61,13 @@ Events follow a strict event spec: each event type (product\_viewed, added\_to\_
 2. Deduplicate within the batch with `LIMIT 1 BY event_id`, and drop event IDs already stored on the matching session.
 3. Sessionise per cookie: a session ends after 30 minutes of inactivity, and each event extends it by 30 minutes. Campaign changes stay in the same session.
 4. Record a touch only on landings. Every landing in a session counts.
-5. Merge sessions into profiles by user. Once a cookie has a user ID, the profile claims that cookie's earlier sessions.
+5. Merge sessions into profiles by cookie. A cookie is one customer, so anonymous sessions before checkout already belong to the right profile; `user_id` is attached once known.
 6. Stamp new orders, and re-stamp orders in the last two partitions so late landings are reflected.
 
 ## Attribution rules
 
 - **Journey window:** landings since the customer's previous order, up to the order time.
-- **First-touch:** the customer's first landing ever (acquisition channel), read from the profile state.
+- **First-touch:** the cookie's first landing ever (acquisition channel), including anonymous sessions before checkout, read from the profile state.
 - **Last-touch:** the latest landing in the current journey before the order.
 - **U-shaped:** 40% first, 40% last, 20% split across the middle. One touch gets 100%, two touches get 50% each. Uses the current journey only.
 - **No landings:** a first order is `unattributed`. A repeat order is `returning, no new touch`.
@@ -76,7 +76,7 @@ Events follow a strict event spec: each event type (product\_viewed, added\_to\_
 
 - **Journey model:** a state machine (landing → product view → add to cart → order) with probabilistic transitions.
 - **Generator:** one worker per customer, seeded per worker for reproducibility, run as separate processes for throughput.
-- **Injected edge cases:** late events, duplicate sends, repeat customers, shared devices, anonymous sessions before checkout, and orders with no landings.
+- **Injected edge cases:** late events, duplicate sends, repeat customers, anonymous sessions before checkout, and orders with no landings. Shared devices are not simulated (see known limitations).
 
 ## Verification
 
@@ -92,7 +92,7 @@ Events follow a strict event spec: each event type (product\_viewed, added\_to\_
 ## Known limitations
 
 - **Split sessions:** sessions can be extended but not merged. A late event landing in the gap between two stored sessions leaves the visit split in two. Attribution is unaffected, since touches are counted per landing. Session counts may be slightly inflated.
-- **Cookie-level stitching only:** journeys across devices are not joined, which biases attribution towards late-funnel channels. Cleared cookies start a new journey. On shared devices, the latest user claims the cookie's sessions.
+- **One cookie is one customer:** profiles are keyed by cookie, with no identity resolution. Journeys across devices are not joined, which biases attribution towards late-funnel channels. Cleared cookies start a new customer. Shared devices are not simulated; two people on one browser would be treated as one customer.
 - **Re-stamping window:** late landings only update orders in the last two partitions. Older orders keep their original stamp.
 - **Batch, not real time:** numbers lag by up to about 5 minutes.
 
@@ -102,12 +102,13 @@ Events follow a strict event spec: each event type (product\_viewed, added\_to\_
 - Rebuild affected sessions with a ReplacingMergeTree to fix split sessions.
 - Add subscriptions using the `conversion_type` column.
 - Put Kafka in front of ingestion for traffic spikes.
+- Key profiles by user, with cookie stitching, to handle shared devices and cross-device journeys.
 
 ## Milestones
 
 1. Docker Compose up, `events` table created, generator inserting.
 2. Sessions refresh with deduplication and the 30-minute timeout.
-3. Profiles with cookie-level stitching and first touch.
+3. Profiles keyed by cookie, with first touch.
 4. Conversions stamped with all three models.
 5. Ground-truth table and verification query passing.
 6. Load test at 10,000 events/sec, with results in the README.

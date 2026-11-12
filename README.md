@@ -14,8 +14,8 @@ Each order gets three attribution models:
 
 The generator also records the correct answer for every order. A single verification
 query checks the pipeline's output against it, including under messy data: late events,
-duplicate sends, shared devices and repeat customers. The target is 10,000 events/sec
-sustained end to end.
+duplicate sends, repeat customers, anonymous sessions before checkout and orders with no
+landings. The target is 10,000 events/sec sustained end to end.
 
 The full design is in the [design spec](PRD.md).
 
@@ -49,7 +49,7 @@ The project is being rebuilt to match the current spec.
 | --- | --- | --- |
 | 1 | Docker Compose up, `events` table created, generator inserting | Partly done (being reworked to the new event model) |
 | 2 | Sessions refresh with deduplication and the 30-minute timeout | Not started |
-| 3 | Profiles with cookie-level stitching and first touch | Not started |
+| 3 | Profiles keyed by cookie, with first touch | Not started |
 | 4 | Conversions stamped with all three models | Not started |
 | 5 | Ground-truth table and verification query passing | Not started |
 | 6 | Load test at 10,000 events/sec, with results in this README | Not started |
@@ -100,9 +100,9 @@ here as each milestone lands.
 - **Split sessions:** sessions can be extended but not merged, so a late event that falls
   in the gap between two stored sessions leaves the visit split in two. Attribution is
   unaffected, but session counts may be slightly high.
-- **Cookie-level stitching only:** journeys across devices are not joined, which biases
-  attribution towards late-funnel channels. On a shared device, the latest user claims
-  the cookie's sessions.
+- **One cookie is one customer:** profiles are keyed by cookie, with no identity
+  resolution. Journeys across devices are not joined, which biases attribution towards
+  late-funnel channels. Shared devices are not simulated.
 - **Re-stamping window:** late landings only update orders in the last two daily
   partitions.
 - **Batch, not real time:** numbers lag by up to about 5 minutes.

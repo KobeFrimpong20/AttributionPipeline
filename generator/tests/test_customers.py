@@ -83,6 +83,24 @@ class SimulateCustomerTest(unittest.TestCase):
         self.assertAlmostEqual(no_landing / visits, NO_LANDING_SHARE, delta=0.004)
         self.assertGreater(orders_without_touch, 0)
 
+    def test_visits_before_first_checkout_are_anonymous(self):
+        # A cookie is one customer: earlier anonymous visits share the cookie of the
+        # visit that orders, so cookie-keyed profiles need no stitching.
+        with_history = 0
+        for seed in range(3_000):
+            r = simulate_customer(seed, START)
+            first_order = next((i for i, v in enumerate(r.visits) if v.ordered), None)
+            if not first_order:
+                continue
+            with_history += 1
+            visits = split_by_visit(r.events, r.visits)
+            checkout = next(i for i, e in enumerate(r.events) if e.event_type == "checkout_started")
+            for e in r.events[:checkout]:
+                self.assertEqual(e.user_id, "")
+            for events in visits[:first_order + 1]:
+                self.assertEqual({e.cookie_id for e in events}, {r.customer.cookie_id})
+        self.assertGreater(with_history, 0)
+
     def test_user_id_persists_after_identification(self):
         for seed in range(3_000):
             r = simulate_customer(seed, START)

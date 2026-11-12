@@ -36,6 +36,8 @@ class Summary:
     no_landing_visits: int
     unattributed_orders: int  # first orders with no landing since the customer arrived
     no_new_touch_orders: int  # repeat orders with no landing since the previous order
+    anon_before_first_order: int  # first orders, earlier visits     on the same cookie
+    first_touch_before_first_order: int  # ...whose first landing ever was in one of them
 
 
 MEDIUM_DELAY = timedelta(minutes=15)
@@ -86,11 +88,20 @@ def duplicate_counts(r: CustomerResult) -> Tuple[int, int, int]:
     return client, len(dups) - client, orders
 
 
+def anonymous_history(r: CustomerResult) -> Tuple[int, int]:
+    """Returns (first order has earlier visits, first landing ever is in one of them)."""
+    first_order = next((i for i, v in enumerate(r.visits) if v.ordered), None)
+    if not first_order:  # no order, or ordered on the first visit
+        return 0, 0
+    return 1, int(any(v.landed for v in r.visits[:first_order]))
+
+
 def summarise(results: Iterable[CustomerResult]) -> Summary:
     customers = visits = events = buyers = repeat_buyers = capped = 0
     late = held = bursts = medium = early = 0
     client_dups = server_dups = dup_orders = 0
     no_landing = unattributed = no_new_touch = 0
+    anon_before = touch_before = 0
     ft_visits = ft_orders = rp_visits = rp_orders = 0
     for r in results:
         customers += 1
@@ -117,9 +128,12 @@ def summarise(results: Iterable[CustomerResult]) -> Summary:
         client_dups, server_dups, dup_orders = client_dups + c, server_dups + sv, dup_orders + do
         nl, ua, nt = no_landing_counts(r)
         no_landing, unattributed, no_new_touch = no_landing + nl, unattributed + ua, no_new_touch + nt
+        ab, tb = anonymous_history(r)
+        anon_before, touch_before = anon_before + ab, touch_before + tb
     return Summary(customers, visits, events, ft_visits, ft_orders, rp_visits, rp_orders,
                    buyers, repeat_buyers, capped, late, held, bursts, medium, early,
-                   client_dups, server_dups, dup_orders, no_landing, unattributed, no_new_touch)
+                   client_dups, server_dups, dup_orders, no_landing, unattributed, no_new_touch,
+                   anon_before, touch_before)
 
 
 def ratio(a: int, b: int) -> float:
@@ -146,6 +160,8 @@ def format_summary(s: Summary) -> str:
         f"visits with no landing          {ratio(s.no_landing_visits, s.visits):.2%}",
         f"first orders, unattributed      {ratio(s.unattributed_orders, s.first_time_orders):.2%}",
         f"repeat orders, no new touch     {ratio(s.no_new_touch_orders, s.repeat_orders):.2%}",
+        f"first orders, earlier visits    {ratio(s.anon_before_first_order, s.first_time_orders):.2%}",
+        f"  first touch in an earlier one {ratio(s.first_touch_before_first_order, s.first_time_orders):.2%}",
     ])
 
 
