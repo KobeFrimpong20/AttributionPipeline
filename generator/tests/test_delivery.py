@@ -1,13 +1,16 @@
 import random
 import unittest
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 import delivery
 from customers import simulate_customer
 from delivery import (
+    DUPLICATE_GAP_SECONDS,
     MEDIUM_DELAY_SECONDS,
     SHORT_DELAY_SECONDS,
+    add_duplicates,
     deliver_visit,
     draw_delay,
 )
@@ -17,10 +20,14 @@ MIN_DELAY = timedelta(seconds=SHORT_DELAY_SECONDS[0])
 MAX_DELAY = timedelta(seconds=MEDIUM_DELAY_SECONDS[1])
 
 
+def originals(deliveries):
+    return [d for d in deliveries if not d.duplicate]
+
+
 def split_visits(deliveries):
-    """Groups a customer's deliveries by visit; each visit opens with its landing."""
+    """Groups a customer's original deliveries by visit; each visit opens with its landing."""
     visits = []
-    for d in deliveries:
+    for d in originals(deliveries):
         if d.event.is_landing:
             visits.append([])
         visits[-1].append(d)
@@ -62,7 +69,7 @@ class DeliverVisitTest(unittest.TestCase):
 
     def test_server_events_are_never_held(self):
         for r in late_customers():
-            for d in r.deliveries:
+            for d in originals(r.deliveries):
                 if d.event.source == "server":
                     self.assertFalse(d.held)
                     self.assertEqual(d.deliver_at, d.event.event_time)
@@ -73,6 +80,49 @@ class DeliverVisitTest(unittest.TestCase):
             for current, nxt in zip(visits, visits[1:]):
                 last_delivery = max(d.deliver_at for d in current)
                 self.assertLess(last_delivery, nxt[0].event.event_time)
+
+
+class DuplicatesTest(unittest.TestCase):
+    MIN_GAP = timedelta(seconds=DUPLICATE_GAP_SECONDS[0])
+    MAX_GAP = timedelta(seconds=DUPLICATE_GAP_SECONDS[1])
+
+    def test_duplicate_follows_its_original(self):
+        for seed in range(3_000):
+            deliveries = simulate_customer(seed, START).deliveries
+            self.assertFalse(deliveries[0].duplicate)
+            for prev, d in zip(deliveries, deliveries[1:]):
+                if not d.duplicate:
+                    continue
+                self.assertFalse(prev.duplicate)
+                self.assertIs(d.event, prev.event)
+                self.assertEqual(d.held, prev.held)
+                self.assertGreaterEqual(d.deliver_at - prev.deliver_at, self.MIN_GAP)
+                self.assertLessEqual(d.deliver_at - prev.deliver_at, self.MAX_GAP)
+
+    def test_every_event_sent_once_or_twice(self):
+        for seed in range(3_000):
+            r = simulate_customer(seed, START)
+            self.assertEqual([d.event for d in originals(r.deliveries)], r.events)
+            counts = Counter(d.event.event_id for d in r.deliveries)
+            self.assertLessEqual(max(counts.values()), 2)
+
+    def test_removing_duplicates_gives_the_plain_deliveries(self):
+        events = simulate_customer(7, START).events
+        plain = deliver_visit(random.Random(3), events, late_sender=True)
+        self.assertEqual(originals(add_duplicates(random.Random(5), plain)), plain)
+
+    def test_duplicate_share_and_sources(self):
+        total = dups = 0
+        sources = set()
+        for seed in range(10_000):
+            for d in simulate_customer(seed, START).deliveries:
+                if d.duplicate:
+                    dups += 1
+                    sources.add(d.event.source)
+                else:
+                    total += 1
+        self.assertAlmostEqual(dups / total, 0.05, delta=0.004)
+        self.assertEqual(sources, {"client", "server"})
 
 
 class SharesTest(unittest.TestCase):
@@ -97,9 +147,10 @@ class DeterminismTest(unittest.TestCase):
     def test_delivery_never_changes_the_journey(self):
         for seed in range(200):
             baseline = simulate_customer(seed, START).events
-            with mock.patch.object(delivery, "LATE_SENDER_SHARE", 1.0):
+            with mock.patch.multiple(delivery, LATE_SENDER_SHARE=1.0, DUPLICATE_SHARE=1.0):
                 forced = simulate_customer(seed, START)
             self.assertTrue(forced.late_sender)
+            self.assertEqual(len(forced.deliveries), 2 * len(baseline))
             self.assertEqual(forced.events, baseline)
 
 

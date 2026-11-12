@@ -8,13 +8,17 @@ connection drops at some client event, the app holds that event and every later
 client event, and flushes them all together once it reconnects. Server events are
 never held, so a held landing can arrive after the server's order event.
 
+Any delivery can also be sent twice: a client retry after a network blip, or two
+server processes racing. The copy is the same event (same event_id and event_time)
+delivered a few seconds later.
+
 Everything here is pure; randomness comes from the `rng` passed in.
 """
 
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import List, Sequence
 
@@ -26,12 +30,16 @@ MEDIUM_DELAY_SHARE = 0.15
 SHORT_DELAY_SECONDS = (5.0, 3 * 60.0)
 MEDIUM_DELAY_SECONDS = (15 * 60.0, 20 * 60.0)
 
+DUPLICATE_SHARE = 0.05
+DUPLICATE_GAP_SECONDS = (0.1, 3.0)
+
 
 @dataclass(frozen=True)
 class Delivery:
     event: Event
     deliver_at: datetime
     held: bool  # part of an offline burst
+    duplicate: bool = False  # second copy of an event already delivered
 
 
 def delivery_rng(seed: int) -> random.Random:
@@ -40,6 +48,11 @@ def delivery_rng(seed: int) -> random.Random:
     A separate stream means delivery draws never change the journey a seed produces.
     """
     return random.Random(f"{seed}:delivery")
+
+
+def duplicates_rng(seed: int) -> random.Random:
+    """Returns the customer's duplicate-send RNG, separate from the other streams."""
+    return random.Random(f"{seed}:duplicates")
 
 
 def is_late_sender(rng: random.Random) -> bool:
@@ -70,3 +83,17 @@ def deliver_visit(rng: random.Random, events: Sequence[Event], late_sender: bool
         Delivery(event=e, deliver_at=deliver_at, held=True) if i in held else on_time(e)
         for i, e in enumerate(events)
     ]
+
+
+def add_duplicates(rng: random.Random, deliveries: Sequence[Delivery]) -> List[Delivery]:
+    """Returns every delivery, each followed by a copy with probability DUPLICATE_SHARE.
+
+    The copy carries the same Event, so its event_id matches the original's.
+    """
+    out: List[Delivery] = []
+    for d in deliveries:
+        out.append(d)
+        if rng.random() < DUPLICATE_SHARE:
+            gap = timedelta(seconds=rng.uniform(*DUPLICATE_GAP_SECONDS))
+            out.append(replace(d, deliver_at=d.deliver_at + gap, duplicate=True))
+    return out

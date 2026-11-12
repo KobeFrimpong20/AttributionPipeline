@@ -30,6 +30,9 @@ class Summary:
     bursts: int
     medium_bursts: int
     orders_before_landing: int  # server order delivered before its visit's landing
+    client_duplicates: int
+    server_duplicates: int
+    duplicated_orders: int  # orders whose server order_placed was sent twice
 
 
 MEDIUM_DELAY = timedelta(minutes=15)
@@ -37,7 +40,8 @@ MEDIUM_DELAY = timedelta(minutes=15)
 
 def delivery_counts(r: CustomerResult) -> Tuple[int, int, int, int]:
     """Returns (held events, bursts, medium bursts, orders delivered before their landing)."""
-    held = [d for d in r.deliveries if d.held]
+    originals = [d for d in r.deliveries if not d.duplicate]
+    held = [d for d in originals if d.held]
     bursts: Dict[datetime, datetime] = {}  # deliver_at -> last held event_time
     for d in held:
         bursts[d.deliver_at] = max(bursts.get(d.deliver_at, d.event.event_time), d.event.event_time)
@@ -45,7 +49,7 @@ def delivery_counts(r: CustomerResult) -> Tuple[int, int, int, int]:
 
     early_orders = 0
     landing_at = datetime.min.replace(tzinfo=timezone.utc)
-    for d in r.deliveries:  # events are in visit order, each visit opens with its landing
+    for d in originals:  # events are in visit order, each visit opens with its landing
         if d.event.is_landing:
             landing_at = d.deliver_at
         elif d.event.source == "server" and d.deliver_at < landing_at:
@@ -53,9 +57,18 @@ def delivery_counts(r: CustomerResult) -> Tuple[int, int, int, int]:
     return len(held), len(bursts), medium, early_orders
 
 
+def duplicate_counts(r: CustomerResult) -> Tuple[int, int, int]:
+    """Returns (client duplicates, server duplicates, duplicated server order events)."""
+    dups = [d.event for d in r.deliveries if d.duplicate]
+    client = sum(e.source == "client" for e in dups)
+    orders = sum(e.source == "server" and e.order_id != "" for e in dups)
+    return client, len(dups) - client, orders
+
+
 def summarise(results: Iterable[CustomerResult]) -> Summary:
     customers = visits = events = buyers = repeat_buyers = capped = 0
     late = held = bursts = medium = early = 0
+    client_dups = server_dups = dup_orders = 0
     ft_visits = ft_orders = rp_visits = rp_orders = 0
     for r in results:
         customers += 1
@@ -77,8 +90,11 @@ def summarise(results: Iterable[CustomerResult]) -> Summary:
         late += r.late_sender
         h, b, m, o = delivery_counts(r)
         held, bursts, medium, early = held + h, bursts + b, medium + m, early + o
+        c, sv, do = duplicate_counts(r)
+        client_dups, server_dups, dup_orders = client_dups + c, server_dups + sv, dup_orders + do
     return Summary(customers, visits, events, ft_visits, ft_orders, rp_visits, rp_orders,
-                   buyers, repeat_buyers, capped, late, held, bursts, medium, early)
+                   buyers, repeat_buyers, capped, late, held, bursts, medium, early,
+                   client_dups, server_dups, dup_orders)
 
 
 def ratio(a: int, b: int) -> float:
@@ -99,6 +115,9 @@ def format_summary(s: Summary) -> str:
         f"events held offline             {ratio(s.held_events, s.events):.2%}",
         f"bursts with a medium delay      {ratio(s.medium_bursts, s.bursts):.2%}",
         f"orders delivered before landing {ratio(s.orders_before_landing, s.first_time_orders + s.repeat_orders):.2%}",
+        f"events sent twice               {ratio(s.client_duplicates + s.server_duplicates, s.events):.2%}",
+        f"  of which server events        {ratio(s.server_duplicates, s.client_duplicates + s.server_duplicates):.2%}",
+        f"orders with a duplicate server  {ratio(s.duplicated_orders, s.first_time_orders + s.repeat_orders):.2%}",
     ])
 
 
