@@ -24,7 +24,7 @@ A single-node ClickHouse pipeline that ingests 10,000 events/sec and computes fi
 2. **Generator** runs one seeded worker per customer, injects edge cases, batch-inserts into `events`, and writes ground truth into `test.expected_attribution`.
 3. **`events`**: raw, append-only MergeTree. No deduplication.
 4. **Refreshable views** (every 5 min, APPEND mode, chained with DEPENDS ON) build `sessions`, then `identity_links`, then `profiles`, then stamp `conversions`.
-5. **Verification query** compares `conversions` with `test.expected_attribution`.
+5. **Verification** (`test.verification` view, `clickhouse/queries/verify.sql`, `python -m verify`) compares `conversions` with `test.expected_attribution`.
 
 Server events are enriched upstream with the browser cookie and aliases before ingestion, so every event arrives with a `cookie_id`.
 
@@ -56,6 +56,8 @@ Events follow a strict event spec: each event type (product\_viewed, added\_to\_
 | identity\_links | AggregatingMergeTree | cookie\_id | The person (`user_id`) a cookie belongs to, from the first session that carried one |
 | profiles | AggregatingMergeTree | profile\_key (`user_id`, or the cookie for a never-identified cookie), kind | Cookies, sessions, first touch via argMinIf((time, channel)), landings as (time, channel, cookie), orders, email and name via argMaxIf, max received\_at (the watermark). Read through the `profiles_current` view |
 | conversions | ReplacingMergeTree(stamped\_at), PARTITION BY day of order\_time | order\_id | Profile, order time, revenue, conversion\_type (first\_order / repeat\_order), attribution\_status, first touch, last touch, U-shaped as Array of (channel, credit) summed per channel, touch count. Read through `conversions_current` (FINAL) |
+| test.customers | MergeTree | cookie\_id | One row per simulated cookie: seed, start, late sender, and when the customer's last delivery arrives |
+| test.expected\_attribution | MergeTree | order\_id | Generator ground truth per order: the reachable answer, the real-person answer, and why they differ (gap\_device, gap\_window) |
 | test.expected\_attribution | MergeTree | order\_id | Generator ground truth per order |
 
 ## Refresh logic (every 5 minutes)
@@ -84,10 +86,13 @@ Events follow a strict event spec: each event type (product\_viewed, added\_to\_
 
 ## Verification
 
-- Full outer join of `conversions FINAL` against `test.expected_attribution` on `order_id`.
-- Flags wrong, missing and invented orders. Revenue compared within one cent.
-- Run only after the final refresh, including the overlap window, has caught up.
-- Every mismatch is either a bug or one of the known limitations below.
+- **Ground truth:** the generator computes every order's answer independently of the SQL (`generator/attribution.py`) and writes it in the same flush as the order's server `order_placed`. It records two answers:
+  - **reachable:** landings on cookies the person logged in on, arriving while the order could still be re-stamped. This is what the pipeline should produce, and verification checks against it.
+  - **real:** every landing the person made.
+- **Known gaps, by cause:** `gap_device` (a landing on a device that never logged in) and `gap_window` (an input that arrived after the re-stamp window). They are reported, not failed.
+- **Judged orders:** only customers whose last delivery is at least two minutes behind the conversions watermark, so nothing about them can still change.
+- **Comparison:** full outer join of `conversions_current` against the judged expected rows on `order_id`. Status, conversion type, first touch, last touch and touch count must be equal, U-shaped credits equal to 9 decimals per channel, revenue within one cent. Orders the pipeline stamped but the generator never wrote are invented.
+- **Pass:** at least one order judged, and zero wrong, missing or invented orders. The pipeline is deterministic, so any mismatch is a bug.
 
 ## Performance target
 

@@ -50,6 +50,7 @@ class ListSink:
     def __init__(self):
         self.events = []
         self.customers = []
+        self.expected = []
         self.batches = 0
 
     def insert_events(self, rows):
@@ -58,6 +59,9 @@ class ListSink:
 
     def insert_customers(self, rows):
         self.customers.extend(rows)
+
+    def insert_expected(self, rows):
+        self.expected.extend(rows)
 
 
 def col(row, name, columns=EVENT_COLUMNS):

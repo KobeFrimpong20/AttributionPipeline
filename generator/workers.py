@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterator, List, Optional
 
+from attribution import Expected, expected_orders
 from customers import CustomerResult, simulate_customer
 from delivery import Delivery
 
@@ -35,6 +36,8 @@ class VisitStep:
     next_worker: Optional[Worker]  # None after the customer's last visit
     cookies: List[str]  # every cookie the customer uses, in order of first use
     late_sender: bool
+    expected: List[Expected]  # ground truth for this visit's orders
+    last_delivery_at: datetime  # when the customer's last delivery arrives
 
 
 def create_worker(seed: int, start: datetime) -> Worker:
@@ -65,11 +68,16 @@ def next_visit(worker: Worker) -> VisitStep:
     if following < len(r.visits):
         wake_at = r.events[r.visits[following].first_event].event_time
         next_worker = Worker(wake_at=wake_at, seed=worker.seed, start=worker.start, visit=following)
+    deliveries = visits[worker.visit]
+    order_ids = {d.event.order_id for d in deliveries if d.event.order_id}
+    expected = [e for o, e in expected_orders(r, worker.seed).items() if o in order_ids] if order_ids else []
     return VisitStep(
-        deliveries=visits[worker.visit],
+        deliveries=deliveries,
         next_worker=next_worker,
         cookies=r.cookies,
         late_sender=r.late_sender,
+        expected=expected,
+        last_delivery_at=max(d.deliver_at for d in r.deliveries),
     )
 
 

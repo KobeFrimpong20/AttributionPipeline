@@ -53,7 +53,7 @@ The project is being rebuilt to match the current spec.
 | 2 | Sessions refresh with deduplication and the 30-minute timeout | Done |
 | 3 | Profiles stitched by identity, with first touch | Done |
 | 4 | Conversions stamped with all three models | Done |
-| 5 | Ground-truth table and verification query passing | Not started |
+| 5 | Ground-truth table and verification query passing | Done |
 | 6 | Load test at 10,000 events/sec, with results in this README | Not started |
 
 ## Run it
@@ -268,7 +268,48 @@ SELECT stamped_at, attribution_status, first_touch, last_touch, u_shaped
 FROM attribution.conversions WHERE order_id = 'order_...' ORDER BY stamped_at DESC;
 ```
 
-The verification check will be added here with milestone 5.
+### Verify the pipeline
+
+The generator writes the correct answer for every order to `test.expected_attribution`,
+computed independently of the SQL. To check the pipeline against it:
+
+```sh
+cd generator
+python3 -m verify   # exits 1 if the check fails
+```
+
+Output from a fresh run, 40 minutes after startup at 20 arrivals/sec:
+
+```
+judged     723
+matched    723
+wrong      0
+missing    0
+invented   0
+gap_device 0
+gap_window 0
+pass       1
+```
+
+Early on, most finished customers are single-visit, so the gaps are 0; they appear as
+customers with second devices finish over the following hours.
+
+- **judged:** only customers who are finished (their last delivery is behind the
+  pipeline), so an order still waiting for a late landing or a phone login isn't judged
+  too early. Single-visit customers finish within minutes; repeat customers take hours.
+- **wrong / missing / invented:** must all be 0 to pass. Any mismatch is listed with
+  expected and actual values for every field.
+- **gap_device / gap_window:** orders where the real person's answer differs from what
+  the pipeline can see: a landing on a device they never logged in on, or an input that
+  arrived after the order left the 2-day re-stamp window. These are known limitations,
+  measured rather than failed.
+
+The same check is in `clickhouse/queries/verify.sql`, and the per-order comparison is the
+`test.verification` view:
+
+```sql
+SELECT outcome, count() FROM test.verification GROUP BY outcome;
+```
 
 ## Known limitations
 

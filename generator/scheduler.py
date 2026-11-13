@@ -10,8 +10,9 @@ import heapq
 import itertools
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Iterator, List, Tuple
+from typing import Dict, Iterator, List, Tuple
 
+from attribution import Expected
 from delivery import Delivery
 from workers import Worker, create_worker, next_visit
 
@@ -30,12 +31,14 @@ class CustomerRecord:
     seed: int
     start: datetime
     late_sender: bool
+    last_delivery_at: datetime  # verification judges the customer once this has passed
 
 
 @dataclass(frozen=True)
 class StepResult:
     deliveries: List[Delivery]  # due by `now`, in deliver_at order
     customers: List[CustomerRecord]  # one per cookie of customers who arrived in this step
+    expected: List[Expected]  # ground truth for orders whose server order_placed is due
 
 
 @dataclass
@@ -46,6 +49,8 @@ class Scheduler:
     waiting: List[Tuple[datetime, int, Worker]] = field(default_factory=list)
     due: List[Tuple[datetime, int, Delivery]] = field(default_factory=list)
     counter: Iterator[int] = field(default_factory=itertools.count)
+    # Ground truth waiting for its order's server order_placed delivery, by order_id.
+    pending: Dict[str, Expected] = field(default_factory=dict)
 
 
 def new_scheduler(seeds: Iterator[int], start: datetime) -> Scheduler:
@@ -84,14 +89,20 @@ def step(s: Scheduler, now: datetime, arrivals_per_sec: float) -> StepResult:
         _, _, worker = heapq.heappop(s.waiting)
         visit = next_visit(worker)
         if worker.visit == 0:
-            customers.extend(CustomerRecord(cookie, worker.seed, worker.start, visit.late_sender)
-                             for cookie in visit.cookies)
+            customers.extend(CustomerRecord(cookie, worker.seed, worker.start, visit.late_sender,
+                                            visit.last_delivery_at) for cookie in visit.cookies)
+        s.pending.update((e.order_id, e) for e in visit.expected)
         for d in visit.deliveries:
             heapq.heappush(s.due, (d.deliver_at, next(s.counter), d))
         if visit.next_worker is not None:
             heapq.heappush(s.waiting, (visit.next_worker.wake_at, next(s.counter), visit.next_worker))
 
     deliveries: List[Delivery] = []
+    expected: List[Expected] = []
     while s.due and s.due[0][0] <= now:
-        deliveries.append(heapq.heappop(s.due)[2])
-    return StepResult(deliveries=deliveries, customers=customers)
+        d = heapq.heappop(s.due)[2]
+        deliveries.append(d)
+        # The truth goes out with the order's server order_placed (never held), once.
+        if d.event.source == "server" and d.event.order_id and not d.duplicate:
+            expected.append(s.pending.pop(d.event.order_id))
+    return StepResult(deliveries=deliveries, customers=customers, expected=expected)

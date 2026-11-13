@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, List, Optional, Protocol, Tuple
 
+from attribution import Expected, Stamp
 from delivery import Delivery
 from scheduler import CustomerRecord, new_scheduler, skip_arrivals, step
 from workers import seeds_for
@@ -24,7 +25,13 @@ EVENT_COLUMNS: Tuple[str, ...] = (
     "event_id", "event_type", "event_time", "cookie_id", "user_id", "source",
     "is_landing", "channel", "order_id", "revenue", "properties",
 )
-CUSTOMER_COLUMNS: Tuple[str, ...] = ("cookie_id", "seed", "start", "late_sender")
+CUSTOMER_COLUMNS: Tuple[str, ...] = ("cookie_id", "seed", "start", "late_sender", "last_delivery_at")
+EXPECTED_COLUMNS: Tuple[str, ...] = (
+    "order_id", "user_id", "seed", "order_time", "revenue", "conversion_type",
+    "status", "first_touch", "last_touch", "u_shaped", "touches",
+    "real_status", "real_first_touch", "real_last_touch", "real_u_shaped",
+    "gap_device", "gap_window",
+)
 
 TICK_SECONDS = 0.1  # how often the real-time loop wakes up
 BACKFILL_STEP = timedelta(seconds=1)  # how far simulated time moves per backfill step
@@ -39,6 +46,7 @@ Clock = Callable[[], datetime]
 class Sink(Protocol):
     def insert_events(self, rows: List[tuple]) -> None: ...
     def insert_customers(self, rows: List[tuple]) -> None: ...
+    def insert_expected(self, rows: List[tuple]) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -62,7 +70,22 @@ def to_row(d: Delivery) -> tuple:
 
 def customer_row(c: CustomerRecord) -> tuple:
     """Returns the values for CUSTOMER_COLUMNS."""
-    return (c.cookie_id, c.seed, c.start, c.late_sender)
+    return (c.cookie_id, c.seed, c.start, c.late_sender, c.last_delivery_at)
+
+
+def credits(s: Stamp) -> List[Tuple[str, float]]:
+    return sorted(s.u_shaped.items())
+
+
+def expected_row(e: Expected) -> tuple:
+    """Returns the values for EXPECTED_COLUMNS."""
+    r, real = e.reachable, e.real
+    return (
+        e.order_id, e.user_id, e.seed, e.order_time, e.revenue, r.conversion_type,
+        r.status, r.first_touch, r.last_touch, credits(r), r.touches,
+        real.status, real.first_touch, real.last_touch, credits(real),
+        e.gap_device, e.gap_window,
+    )
 
 
 def run_workers(
@@ -92,6 +115,7 @@ def run_workers(
 
     events: List[tuple] = []
     customers: List[tuple] = []
+    expected: List[tuple] = []
     sim_now = start
     caught_up = config.backfill_hours <= 0
     last_flush = last_log = clock()
@@ -101,15 +125,17 @@ def run_workers(
     max_lag = 0.0  # seconds; largest insert time minus deliver_at since the last log
 
     def flush(now: datetime) -> None:
-        nonlocal events, customers, inserted, oldest_buffered, max_lag
+        nonlocal events, customers, expected, inserted, oldest_buffered, max_lag
         if customers:
             sink.insert_customers(customers)
         if events:
             sink.insert_events(events)
+        if expected:  # after the events, so truth never exists before its order
+            sink.insert_expected(expected)
         if caught_up and oldest_buffered is not None:
             max_lag = max(max_lag, (now - oldest_buffered).total_seconds())
         inserted += len(events)
-        events, customers, oldest_buffered = [], [], None
+        events, customers, expected, oldest_buffered = [], [], [], None
 
     log(f"{label} started: {rate:g} arrivals/s, backfill {config.backfill_hours:g} h, "
         f"run {config.run_id}")
@@ -133,6 +159,7 @@ def run_workers(
             oldest_buffered = result.deliveries[0].deliver_at
         events.extend(to_row(d) for d in result.deliveries)
         customers.extend(customer_row(c) for c in result.customers)
+        expected.extend(expected_row(e) for e in result.expected)
 
         if len(events) >= config.batch_size or (real - last_flush).total_seconds() >= config.flush_seconds:
             flush(clock())
@@ -178,6 +205,9 @@ class ClickHouseSink:
 
     def insert_customers(self, rows: List[tuple]) -> None:
         self.client.insert("customers", rows, column_names=list(CUSTOMER_COLUMNS), database="test")
+
+    def insert_expected(self, rows: List[tuple]) -> None:
+        self.client.insert("expected_attribution", rows, column_names=list(EXPECTED_COLUMNS), database="test")
 
 
 def utc_now() -> datetime:
