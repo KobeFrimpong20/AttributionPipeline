@@ -60,12 +60,15 @@ ORDER BY (cookie_id, received_at);
 
 
 -- -----------------------------------------------------------------------------
--- test.customers: one row per simulated customer
+-- test.customers: one row per simulated cookie
 --
 -- Generator metadata lives in its own database so the pipeline can never read it.
 -- seed and start rebuild a customer's exact events, so any cookie in events can be
 -- traced back to its input:  python -m explain --seed <seed> --start <start>
--- start keeps microseconds because the replay needs the exact arrival time.
+-- start keeps microseconds because the replay needs the exact arrival time. A
+-- customer with a second device or a cleared cookie has one row per cookie.
+-- last_delivery_at is when the customer's last event arrives; verification only
+-- judges customers once that has passed.
 -- -----------------------------------------------------------------------------
 CREATE DATABASE IF NOT EXISTS test;
 
@@ -73,6 +76,42 @@ CREATE TABLE test.customers (
   cookie_id String,
   seed UInt64,
   start DateTime64(6, 'UTC'),
-  late_sender Bool
+  late_sender Bool,
+  last_delivery_at DateTime64(3, 'UTC')
 ) ENGINE = MergeTree
 ORDER BY cookie_id;
+
+
+-- -----------------------------------------------------------------------------
+-- test.expected_attribution: the correct answer for every order (ground truth)
+--
+-- Written by the generator in the same flush as the order's server order_placed,
+-- computed by generator/attribution.py independently of the SQL. Two answers:
+--   status ... touches      reachable: what the pipeline can see (landings on
+--                           cookies the person logged in on, arriving while the
+--                           order could still be re-stamped). Verification checks
+--                           the pipeline against this.
+--   real_*                  the real person: every landing they made.
+-- gap_device / gap_window say why real differs from reachable: a landing on a
+-- device that never logged in, or an input that arrived after the re-stamp window.
+-- -----------------------------------------------------------------------------
+CREATE TABLE test.expected_attribution (
+  order_id String,
+  user_id String,
+  seed UInt64,
+  order_time DateTime64(3, 'UTC'),
+  revenue Decimal(12, 2),
+  conversion_type LowCardinality(String),
+  status LowCardinality(String),
+  first_touch LowCardinality(String),
+  last_touch LowCardinality(String),
+  u_shaped Array(Tuple(channel String, credit Float64)),
+  touches UInt16,
+  real_status LowCardinality(String),
+  real_first_touch LowCardinality(String),
+  real_last_touch LowCardinality(String),
+  real_u_shaped Array(Tuple(channel String, credit Float64)),
+  gap_device Bool,
+  gap_window Bool
+) ENGINE = MergeTree
+ORDER BY order_id;

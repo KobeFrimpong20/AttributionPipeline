@@ -14,14 +14,14 @@ def key(d):
     return (d.event.event_id, d.deliver_at, d.duplicate)
 
 
-def run(tick=timedelta(minutes=1)):
+def run(tick=timedelta(minutes=1), with_expected=False):
     """Drives a scheduler over a finite set of seeds until it has nothing left."""
     s = new_scheduler(iter(range(CUSTOMERS)), START)
     now = START
     batches, customers = [], []
     while True:
         result = step(s, now, RATE)
-        batches.append((now, result.deliveries))
+        batches.append((now, result.deliveries, result.expected) if with_expected else (now, result.deliveries))
         customers.extend(result.customers)
         if not s.waiting and not s.due and now > START + timedelta(seconds=CUSTOMERS / RATE):
             return batches, customers
@@ -64,6 +64,30 @@ class SchedulerTest(unittest.TestCase):
         s = new_scheduler(iter(range(10**9)), START)
         result = step(s, START + timedelta(seconds=99), arrivals_per_sec=2.0)
         self.assertEqual(len({c.seed for c in result.customers}), 199)  # arrivals at 0, 0.5, ..., 99 s
+
+
+class GroundTruthTest(unittest.TestCase):
+    def test_truth_emitted_once_with_its_server_order(self):
+        batches, customers = run(with_expected=True)
+        seen = []
+        for _, deliveries, expected in batches:
+            server_orders = {d.event.order_id for d in deliveries
+                             if d.event.source == "server" and d.event.order_id and not d.duplicate}
+            self.assertEqual({e.order_id for e in expected}, server_orders)
+            seen.extend(e.order_id for e in expected)
+        self.assertEqual(len(seen), len(set(seen)))
+        all_orders = set()
+        for i in range(CUSTOMERS):
+            r = simulate_customer(i, START + timedelta(seconds=i / RATE))
+            all_orders |= {e.order_id for e in r.events if e.order_id}
+        self.assertEqual(set(seen), all_orders)
+        self.assertTrue(seen)
+
+    def test_last_delivery_at(self):
+        _, customers = run()
+        for c in customers:
+            r = simulate_customer(c.seed, c.start)
+            self.assertEqual(c.last_delivery_at, max(d.deliver_at for d in r.deliveries))
 
 
 class SkipArrivalsTest(unittest.TestCase):

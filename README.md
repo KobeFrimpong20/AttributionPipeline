@@ -52,9 +52,9 @@ The project is being rebuilt to match the current spec.
 | 1 | Docker Compose up, `events` table created, generator inserting | Done |
 | 2 | Sessions refresh with deduplication and the 30-minute timeout | Done |
 | 3 | Profiles stitched by identity, with first touch | Done |
-| 4 | Conversions stamped with all three models | Not started |
-| 5 | Ground-truth table and verification query passing | Not started |
-| 6 | Load test at 10,000 events/sec, with results in this README | Not started |
+| 4 | Conversions stamped with all three models | Done |
+| 5 | Ground-truth table and verification query passing | Done |
+| 6 | Load test at 10,000 events/sec, with results in this README | Run: ingest holds 10k, refreshes run out of memory at 10k ([results](#load-test-results)) |
 
 ## Run it
 
@@ -235,8 +235,123 @@ FROM attribution.identity_links WHERE cookie_id = 'cookie_...' GROUP BY cookie_i
 `first_touch_time` is NULL for someone with no landing yet. Profiles link on `user_id` (and
 `email`, which always comes with it), never on `name`: names are not unique.
 
-Queries for conversions and the verification check will be added here as each milestone
-lands.
+### Conversions
+
+`mv_conversions` runs after `mv_profiles` and stamps every order with three models:
+
+- **First-touch:** the person's first landing ever, across all their cookies.
+- **Last-touch:** the latest landing since their previous order.
+- **U-shaped:** the lifetime first touch plus the landings since the previous order:
+  40% first, 40% last, 20% split across the middle, summed per channel.
+
+When something changes for a person (a late landing, a newly linked cookie, another
+order), their recent orders are stamped again. `conversions` keeps every stamp and the
+latest wins, so read it through `conversions_current`:
+
+```sql
+-- Revenue by channel under each model
+SELECT channel,
+       sumIf(revenue, first_touch = channel) AS first_touch_revenue,
+       sumIf(revenue, last_touch = channel) AS last_touch_revenue,
+       sum(revenue * arraySum(arrayMap(t -> if(t.channel = channel, t.credit, 0), u_shaped))) AS u_shaped_revenue
+FROM attribution.conversions_current
+ARRAY JOIN arrayDistinct(arrayConcat([first_touch, last_touch], u_shaped.channel)) AS channel
+WHERE channel != ''
+GROUP BY channel ORDER BY u_shaped_revenue DESC;
+
+-- How orders were attributed
+SELECT conversion_type, attribution_status, count() FROM attribution.conversions_current
+GROUP BY ALL ORDER BY ALL;
+
+-- Every stamp of one order, newest first (re-stamps after late data)
+SELECT stamped_at, attribution_status, first_touch, last_touch, u_shaped
+FROM attribution.conversions WHERE order_id = 'order_...' ORDER BY stamped_at DESC;
+```
+
+### Verify the pipeline
+
+The generator writes the correct answer for every order to `test.expected_attribution`,
+computed independently of the SQL. To check the pipeline against it:
+
+```sh
+cd generator
+python3 -m verify   # exits 1 if the check fails
+```
+
+Output from a fresh run, 40 minutes after startup at 20 arrivals/sec:
+
+```
+judged     723
+matched    723
+wrong      0
+missing    0
+invented   0
+gap_device 0
+gap_window 0
+pass       1
+```
+
+Early on, most finished customers are single-visit, so the gaps are 0; they appear as
+customers with second devices finish over the following hours.
+
+- **judged:** only customers who are finished (their last delivery is behind the
+  pipeline), so an order still waiting for a late landing or a phone login isn't judged
+  too early. Single-visit customers finish within minutes; repeat customers take hours.
+- **wrong / missing / invented:** must all be 0 to pass. Any mismatch is listed with
+  expected and actual values for every field.
+- **gap_device / gap_window:** orders where the real person's answer differs from what
+  the pipeline can see: a landing on a device they never logged in on, or an input that
+  arrived after the order left the 2-day re-stamp window. These are known limitations,
+  measured rather than failed.
+
+The same check is in `clickhouse/queries/verify.sql`, and the per-order comparison is the
+`test.verification` view:
+
+```sql
+SELECT outcome, count() FROM test.verification GROUP BY outcome;
+```
+
+## Load test results
+
+Run on 2026-11-13 on a laptop, with Docker limited to 8 CPUs and 7.65 GiB of memory,
+shared by ClickHouse and the generator. The generator used `PROCESSES=6`. To reach
+10,000 events/sec without hours of warm-up, it ran at 1,500 and then 3,000 arrivals per
+second instead of letting repeat visits build up at 1,190. The event volume is real, but
+it is mostly first visits.
+
+**Ingest: passes.** The generator reached **10,371 events/sec**. Every insert landed
+within 1.6 s of its delivery time (`max lag`), and the generator used about half a CPU core.
+
+**Refreshes: pass up to about 8,600 events/sec, fail at 10,000.** Time and peak memory
+for each 5-minute cycle:
+
+| Events/sec | sessions | profiles | Whole chain | Result |
+| --- | --- | --- | --- | --- |
+| ~140 | 0.1 s / 150 MiB | 0.15 s / 220 MiB | ~0.3 s | ok |
+| ~4,900 | 1.4 s / 1.4 GiB | 1.6 s / 2.5 GiB | ~3 s | ok |
+| ~8,600 | 2.9 s / 2.5 GiB | 3.9 s / 4.2 GiB | ~7 s | ok |
+| ~10,200 | ~4 s / 4.3 GiB | ~4 s / 4.5 GiB | n/a | out of memory |
+
+`identity_links` and `conversions` stayed under 0.2 s and 250 MiB throughout.
+
+- **Time is not the limit.** Even at the failure point the chain used a few seconds of
+  its 5-minute budget.
+- **Memory is the limit.** The ClickHouse server's cap was 4.65 to 4.95 GiB: by default
+  it is a share of the container's memory, which it shares with the generator. At about
+  10,200 events/sec, `profiles` failed all 3 retries and `conversions` stopped updating
+  because it waits on `profiles`. At the next cycle `sessions` failed as well.
+- **The failure does not recover on its own.** After the generator stopped, `sessions`
+  caught up on its 4.1 million-event backlog in one run. `profiles` did not: each refresh
+  processes everything since its last success in one go, so its input kept growing. Its
+  next attempt, covering 15 minutes of sessions, needed more than 6.2 GiB and failed again.
+- **Correctness under load.** At about 5,000 events/sec, verification matched 84,582 of
+  84,588 orders. The 6 wrong orders belonged to customers cut off when the generator was
+  restarted for the test: their remaining events were never sent (see
+  [Long runs on a laptop](#long-runs-on-a-laptop)), so they were not pipeline errors. The
+  10,000 events/sec run was not verified, because `conversions` had stopped updating.
+
+The per-cycle numbers come from `system.query_log` (refresh queries show up as
+`INSERT INTO attribution.<table>`), and the failures from `system.view_refreshes`.
 
 ## Known limitations
 
@@ -251,6 +366,9 @@ lands.
 - **Re-stamping window:** late landings only update orders in the last two daily
   partitions.
 - **Batch, not real time:** numbers lag by up to about 5 minutes.
+- **Refresh memory grows with the backlog:** each refresh processes everything since its
+  last success in one go. On a 7.65 GiB machine, `profiles` runs out of memory at about
+  10,000 events/sec and then can't catch up (see [Load test results](#load-test-results)).
 
 ## Out of scope
 
