@@ -54,7 +54,7 @@ The project is being rebuilt to match the current spec.
 | 3 | Profiles stitched by identity, with first touch | Done |
 | 4 | Conversions stamped with all three models | Done |
 | 5 | Ground-truth table and verification query passing | Done |
-| 6 | Load test at 10,000 events/sec, with results in this README | Not started |
+| 6 | Load test at 10,000 events/sec, with results in this README | Run: ingest holds 10k, refreshes run out of memory at 10k ([results](#load-test-results)) |
 
 ## Run it
 
@@ -311,6 +311,48 @@ The same check is in `clickhouse/queries/verify.sql`, and the per-order comparis
 SELECT outcome, count() FROM test.verification GROUP BY outcome;
 ```
 
+## Load test results
+
+Run on 2026-11-13 on a laptop, with Docker limited to 8 CPUs and 7.65 GiB of memory,
+shared by ClickHouse and the generator. The generator used `PROCESSES=6`. To reach
+10,000 events/sec without hours of warm-up, it ran at 1,500 and then 3,000 arrivals per
+second instead of letting repeat visits build up at 1,190. The event volume is real, but
+it is mostly first visits.
+
+**Ingest: passes.** The generator reached **10,371 events/sec**. Every insert landed
+within 1.6 s of its delivery time (`max lag`), and the generator used about half a CPU core.
+
+**Refreshes: pass up to about 8,600 events/sec, fail at 10,000.** Time and peak memory
+for each 5-minute cycle:
+
+| Events/sec | sessions | profiles | Whole chain | Result |
+| --- | --- | --- | --- | --- |
+| ~140 | 0.1 s / 150 MiB | 0.15 s / 220 MiB | ~0.3 s | ok |
+| ~4,900 | 1.4 s / 1.4 GiB | 1.6 s / 2.5 GiB | ~3 s | ok |
+| ~8,600 | 2.9 s / 2.5 GiB | 3.9 s / 4.2 GiB | ~7 s | ok |
+| ~10,200 | ~4 s / 4.3 GiB | ~4 s / 4.5 GiB | n/a | out of memory |
+
+`identity_links` and `conversions` stayed under 0.2 s and 250 MiB throughout.
+
+- **Time is not the limit.** Even at the failure point the chain used a few seconds of
+  its 5-minute budget.
+- **Memory is the limit.** The ClickHouse server's cap was 4.65 to 4.95 GiB: by default
+  it is a share of the container's memory, which it shares with the generator. At about
+  10,200 events/sec, `profiles` failed all 3 retries and `conversions` stopped updating
+  because it waits on `profiles`. At the next cycle `sessions` failed as well.
+- **The failure does not recover on its own.** After the generator stopped, `sessions`
+  caught up on its 4.1 million-event backlog in one run. `profiles` did not: each refresh
+  processes everything since its last success in one go, so its input kept growing. Its
+  next attempt, covering 15 minutes of sessions, needed more than 6.2 GiB and failed again.
+- **Correctness under load.** At about 5,000 events/sec, verification matched 84,582 of
+  84,588 orders. The 6 wrong orders belonged to customers cut off when the generator was
+  restarted for the test: their remaining events were never sent (see
+  [Long runs on a laptop](#long-runs-on-a-laptop)), so they were not pipeline errors. The
+  10,000 events/sec run was not verified, because `conversions` had stopped updating.
+
+The per-cycle numbers come from `system.query_log` (refresh queries show up as
+`INSERT INTO attribution.<table>`), and the failures from `system.view_refreshes`.
+
 ## Known limitations
 
 - **Split sessions:** sessions can be extended but not merged, so a late event that falls
@@ -324,6 +366,9 @@ SELECT outcome, count() FROM test.verification GROUP BY outcome;
 - **Re-stamping window:** late landings only update orders in the last two daily
   partitions.
 - **Batch, not real time:** numbers lag by up to about 5 minutes.
+- **Refresh memory grows with the backlog:** each refresh processes everything since its
+  last success in one go. On a 7.65 GiB machine, `profiles` runs out of memory at about
+  10,000 events/sec and then can't catch up (see [Load test results](#load-test-results)).
 
 ## Out of scope
 
