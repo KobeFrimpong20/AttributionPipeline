@@ -268,6 +268,51 @@ SELECT stamped_at, attribution_status, first_touch, last_touch, u_shaped
 FROM attribution.conversions WHERE order_id = 'order_...' ORDER BY stamped_at DESC;
 ```
 
+### Channel summary
+
+Revenue and new customers per channel under each model, and the overall totals. The
+pipeline has no ad spend or product costs, so ROAS, CAC and margin can't be computed:
+these give the revenue and new-customer side of them.
+
+```sql
+-- One row per channel: revenue credited to it under first-touch, last-touch and
+-- U-shaped, and how many first orders it brought in (first touch).
+SELECT
+  channel,
+  round(sumIf(revenue, first_touch = channel))  AS first_touch_rev,
+  round(sumIf(revenue, last_touch = channel))   AS last_touch_rev,
+  round(sum(revenue * u_credit))                AS u_shaped_rev,
+  countIf(first_touch = channel
+          AND conversion_type = 'first_order')  AS new_customers
+FROM (
+  -- Expand each order into one row per U-shaped channel credit, plus one empty
+  -- row so an order still appears for a channel it got no U-shaped credit from.
+  SELECT *,
+         arrayJoin(arrayConcat(u_shaped, [('', 0.)])) AS u,
+         u.1 AS channel,
+         u.2 AS u_credit
+  FROM attribution.conversions_current
+  WHERE attribution_status != 'unattributed'
+)
+WHERE channel != ''
+GROUP BY channel
+ORDER BY u_shaped_rev DESC;
+
+-- Overall totals. The alias c is needed: without it, sum(revenue) resolves to the
+-- view's own revenue column, which is already an aggregate.
+SELECT
+  count()                                                         AS orders,
+  round(sum(c.revenue))                                           AS total_revenue,
+  round(avg(c.revenue), 2)                                        AS aov,
+  round(countIf(c.conversion_type = 'repeat_order') / count(), 3) AS repeat_share,
+  countIf(c.attribution_status = 'unattributed')                  AS unattributed
+FROM attribution.conversions_current AS c;
+```
+
+The three models give similar numbers here because the generator picks each landing's
+channel independently of where it falls in the journey. In real data, where some
+channels tend to open journeys and others to close them, they differ much more.
+
 ### Verify the pipeline
 
 The generator writes the correct answer for every order to `test.expected_attribution`,
