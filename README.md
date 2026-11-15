@@ -235,6 +235,68 @@ FROM attribution.identity_links WHERE cookie_id = 'cookie_...' GROUP BY cookie_i
 `first_touch_time` is NULL for someone with no landing yet. Profiles link on `user_id` (and
 `email`, which always comes with it), never on `name`: names are not unique.
 
+#### Anonymous profiles that were stitched
+
+When a cookie is linked, its provisional profile stays in `attribution.profiles` and
+`profiles_current` only hides it. So you can see both sides: the anonymous profiles and
+the person they became.
+
+```sql
+-- People whose profile absorbed anonymous profiles: cookies that had a provisional
+-- profile and were later linked to a person.
+WITH stitched AS (
+  SELECT p.profile_key AS cookie_id,
+         argMinMerge(l.user_id) AS user_id,
+         min(l.linked_at) AS linked_at
+  FROM attribution.profiles AS p
+  JOIN attribution.identity_links AS l ON l.cookie_id = p.profile_key
+  WHERE p.kind = 'cookie'
+  GROUP BY p.profile_key
+)
+SELECT
+  pc.profile_key AS user_id,
+  pc.email,
+  length(pc.cookies) AS cookies,
+  length(pc.sessions) AS sessions,
+  pc.first_touch_channel,
+  groupArray(s.cookie_id) AS stitched_cookies,
+  min(s.linked_at) AS first_linked_at,
+  length(pc.orders) AS orders
+FROM stitched AS s
+JOIN attribution.profiles_current AS pc ON pc.profile_key = s.user_id AND pc.kind = 'user'
+GROUP BY ALL
+ORDER BY cookies DESC, sessions DESC
+LIMIT 10;
+```
+
+Then compare one person's anonymous profiles with their stitched profile (replace the
+`user_id` in both queries):
+
+```sql
+-- Before: each cookie's anonymous profile.
+SELECT profile_key AS cookie, kind,
+       groupUniqArrayArrayMerge(sessions) AS sessions,
+       arrayMap(x -> x.2, arraySort(groupUniqArrayArrayMerge(landings))) AS landing_channels
+FROM attribution.profiles
+WHERE kind = 'cookie' AND profile_key IN (
+  SELECT cookie_id FROM attribution.identity_links
+  GROUP BY cookie_id HAVING argMinMerge(user_id) = 'user_...')
+GROUP BY profile_key, kind
+FORMAT Vertical;
+
+-- After: the stitched person.
+SELECT profile_key, email, name, cookies, length(sessions) AS sessions,
+       first_touch_channel, arrayMap(x -> (x.2, x.3), arraySort(landings)) AS landings, orders
+FROM attribution.profiles_current
+WHERE profile_key = 'user_...'
+FORMAT Vertical;
+```
+
+The stitched profile has every session from the anonymous profiles, plus any session
+that happened after its cookie was linked. Those later sessions go straight to the
+person, so they never appear in an anonymous profile. Each landing is tagged with the
+cookie it came from, and the first touch is the earliest landing across all of them.
+
 ### Conversions
 
 `mv_conversions` runs after `mv_profiles` and stamps every order with three models:
